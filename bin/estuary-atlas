@@ -68,7 +68,52 @@ if [ $AUTH_STATUS -ne 0 ] || echo "$AUTH_OUT" | grep -qiE "unauth|no token|not.*
   printf "${DIM}%s${RST}\n" "$AUTH_OUT" | head -5
   exit 1
 fi
-ok "authenticated ($(echo "$AUTH_OUT" | grep -oE '[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+' | head -1 || echo 'ok'))"
+
+# Resolve the CURRENT user (not a random grant in the tenant). flowctl stores
+# the access token in its config; the JWT's `sub` claim is our user_id, which
+# we then look up in `auth roles list` to get email + name.
+CURRENT_USER=""
+CFG=""
+for candidate in \
+  "$HOME/Library/Application Support/flowctl/default.json" \
+  "$HOME/Library/Application Support/flowctl/config.json" \
+  "$HOME/.config/flowctl/default.json" \
+  "$HOME/.config/flowctl/config.json" \
+  "$HOME/.flowctl/default.json"; do
+  if [ -f "$candidate" ]; then CFG="$candidate"; break; fi
+done
+if [ -n "$CFG" ] && command -v node >/dev/null 2>&1; then
+  CURRENT_USER="$(node -e "
+    try {
+      const fs = require('fs');
+      const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+      const jwt = cfg.user_access_token || '';
+      const parts = jwt.split('.');
+      if (parts.length < 2) process.exit(0);
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+      process.stdout.write(payload.sub || '');
+    } catch (e) {}
+  " "$CFG" 2>/dev/null)"
+fi
+if [ -n "$CURRENT_USER" ]; then
+  # Each grant block is `key: value` lines. Track last-seen email/name and
+  # emit them when we hit a matching user_id line in the same block.
+  EMAIL_AND_NAME="$(awk -v uid="$CURRENT_USER" '
+    /^user_email:/ { last_email = $2 }
+    /^user_full_name:/ { sub(/^user_full_name: /, ""); last_name = $0 }
+    /^user_id:/ && $2 == uid {
+      print last_email "|" last_name
+      exit
+    }
+  ' <<<"$AUTH_OUT")"
+  EMAIL="${EMAIL_AND_NAME%%|*}"
+  FULLNAME="${EMAIL_AND_NAME#*|}"
+fi
+if [ -n "${EMAIL:-}" ]; then
+  ok "authenticated as ${EMAIL}${FULLNAME:+ ($FULLNAME)}"
+else
+  ok "authenticated"
+fi
 
 # 4) Pick a free port
 step "Finding free port"
