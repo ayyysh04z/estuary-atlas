@@ -1,0 +1,168 @@
+name: Release
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggered when you push a semver tag like `v0.1.1`.
+# What it does:
+#   1. Builds the tarball via scripts/build.sh
+#   2. Creates a GitHub release + uploads the tarball as an asset
+#   3. Computes SHA256
+#   4. Clones the Homebrew tap repo (ayyysh04z/homebrew-atlas) and updates
+#      Formula/estuary-atlas.rb with the new version/url/sha256
+#   5. Commits + pushes the tap update
+#
+# One-time setup (repo → Settings → Secrets and variables → Actions):
+#   TAP_PUSH_TOKEN   — a Personal Access Token with `repo` scope,
+#                      write access to ayyysh04z/homebrew-atlas.
+#                      Generate at https://github.com/settings/tokens
+#
+# How to cut a release:
+#   pnpm version patch   # 0.1.0 → 0.1.1, commits + tags
+#   git push --follow-tags
+#
+# The default GITHUB_TOKEN is enough for creating releases on this repo.
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.1.1). Leave empty to use package.json.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TAP_REPO: ayyysh04z/homebrew-atlas
+  FORMULA_PATH: Formula/estuary-atlas.rb
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: Get pnpm store dir
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          elif [ -n "${GITHUB_REF##refs/tags/v}" ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF##refs/tags/v}"
+          else
+            V="$(node -p "require('./package.json').version")"
+          fi
+          echo "version=$V" >> $GITHUB_OUTPUT
+          echo "tag=v$V" >> $GITHUB_OUTPUT
+          echo "Resolved version: v$V"
+
+      - name: Build tarball
+        run: bash scripts/build.sh tarball
+
+      - name: Verify tarball exists + compute sha256
+        id: sha
+        run: |
+          TAR="artifacts/dist/estuary-atlas-v${{ steps.v.outputs.version }}.tar.gz"
+          test -f "$TAR" || { echo "Missing $TAR"; exit 1; }
+          SHA=$(shasum -a 256 "$TAR" | awk '{print $1}')
+          echo "sha256=$SHA" >> $GITHUB_OUTPUT
+          echo "path=$TAR" >> $GITHUB_OUTPUT
+          echo "size=$(du -sh "$TAR" | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub release
+        id: rel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: Estuary Atlas ${{ steps.v.outputs.tag }}
+          files: ${{ steps.sha.outputs.path }}
+          generate_release_notes: true
+          body: |
+            **Internal team release.**
+            Size: ${{ steps.sha.outputs.size }}
+            SHA256: `${{ steps.sha.outputs.sha256 }}`
+
+            ## Install / upgrade via Homebrew
+            ```
+            brew tap ayyysh04z/atlas
+            brew install estuary-atlas       # first time
+            brew upgrade estuary-atlas       # existing users
+            estuary-atlas                    # opens the UI in your browser
+            ```
+
+      - name: Update Homebrew tap
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          if [ -z "$TAP_PUSH_TOKEN" ]; then
+            echo "::warning::TAP_PUSH_TOKEN not set — skipping tap update. Formula must be bumped manually."
+            exit 0
+          fi
+          VERSION="${{ steps.v.outputs.version }}"
+          SHA="${{ steps.sha.outputs.sha256 }}"
+          URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/estuary-atlas-v${VERSION}.tar.gz"
+
+          git config --global user.name "estuary-atlas-release-bot"
+          git config --global user.email "release-bot@users.noreply.github.com"
+
+          git clone "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/${TAP_REPO}.git" tap
+          cd tap
+          mkdir -p "$(dirname "$FORMULA_PATH")"
+
+          # Idempotent update: patch existing formula, or write a fresh one.
+          if [ -f "$FORMULA_PATH" ]; then
+            awk -v v="$VERSION" -v u="$URL" -v s="$SHA" '
+              /^  version / { print "  version \"" v "\""; next }
+              /^  url /     { print "  url \"" u "\"";     next }
+              /^  sha256 /  { print "  sha256 \"" s "\"";  next }
+              { print }
+            ' "$FORMULA_PATH" > "$FORMULA_PATH.new"
+            mv "$FORMULA_PATH.new" "$FORMULA_PATH"
+          else
+            cp "$GITHUB_WORKSPACE/Formula/estuary-atlas.rb" "$FORMULA_PATH"
+            sed -i "s|^  version .*|  version \"$VERSION\"|" "$FORMULA_PATH"
+            sed -i "s|^  url .*|  url \"$URL\"|" "$FORMULA_PATH"
+            sed -i "s|^  sha256 .*|  sha256 \"$SHA\"|" "$FORMULA_PATH"
+          fi
+
+          git add "$FORMULA_PATH"
+          if git diff --staged --quiet; then
+            echo "No formula changes."
+          else
+            git commit -m "estuary-atlas v${VERSION}"
+            git push origin HEAD:main
+            echo "Pushed formula update to ${TAP_REPO}"
+          fi

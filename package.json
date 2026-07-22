@@ -1,0 +1,31 @@
+{
+  "name": "estuary-atlas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "package": "bash scripts/package.sh",
+    "start": "bin/estuary-atlas",
+    "build:tarball": "bash scripts/build.sh tarball",
+    "build:binary": "bash scripts/build.sh binary",
+    "build:dist": "bash scripts/build.sh all",
+    "release:brew": "bash scripts/release.sh"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-node": "5.2.12",
+    "@sveltejs/kit": "2.20.2",
+    "@sveltejs/vite-plugin-svelte": "5.0.3",
+    "@types/node": "22.10.5",
+    "svelte": "5.20.2",
+    "svelte-check": "4.1.4",
+    "typescript": "5.7.3",
+    "vite": "6.0.7"
+  },
+  "dependencies": {
+    "microdiff": "1.5.0"
+  }
+}

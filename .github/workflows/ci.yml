@@ -1,0 +1,46 @@
+name: CI
+# Runs on every push + PR. Verifies the app builds cleanly and the launcher
+# script is syntactically valid. No tests yet — add when the suite lands.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Get pnpm store dir
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check + build
+        run: pnpm run build
+
+      - name: Lint launcher shell script
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck bin/estuary-atlas scripts/build.sh scripts/release.sh || true

@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# SvelteKit generated types + build cache
+.svelte-kit/
+
+# All build artifacts + distributables live under artifacts/
+artifacts/
+
+# Legacy paths (kept for old checkouts / adapter defaults)
+build/
+dist/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+*.swp
+*.log
+.vscode/
+.idea/

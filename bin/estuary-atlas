@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Estuary Atlas launcher — precheck, start, open browser.
+set -e
+
+RED='\033[31m'; GRN='\033[32m'; YLW='\033[33m'; CYA='\033[36m'; DIM='\033[2m'; RST='\033[0m'
+
+hr()   { printf "${DIM}%s${RST}\n" "──────────────────────────────────────────────────────"; }
+ok()   { printf "${GRN}✔${RST} %s\n" "$*"; }
+warn() { printf "${YLW}⚠${RST} %s\n" "$*"; }
+err()  { printf "${RED}✗${RST} %s\n" "$*"; }
+step() { printf "${CYA}▸${RST} %s\n" "$*"; }
+
+BOLD='\033[1m'
+printf "\n${BOLD}Estuary Atlas${RST}\n"
+hr
+
+# Resolve app dir (works when symlinked or invoked from PATH).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+BIN_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+APP_DIR="$( cd -P "$BIN_DIR/.." >/dev/null 2>&1 && pwd )"
+
+# 1) Node
+step "Checking Node.js"
+if ! command -v node >/dev/null 2>&1; then
+  err "node not found on PATH"
+  echo "   Install:  brew install node"
+  echo "   Or from:  https://nodejs.org"
+  exit 1
+fi
+NODE_VER_STR="$(node -v 2>/dev/null | sed 's/^v//')"
+NODE_MAJOR="$(echo "$NODE_VER_STR" | cut -d. -f1)"
+if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 18 ]; then
+  err "Node $NODE_VER_STR is too old — need v18 or newer"
+  echo "   Upgrade: brew install node   (or: brew upgrade node)"
+  exit 1
+fi
+ok "node v$NODE_VER_STR"
+
+# 2) flowctl binary
+step "Checking flowctl"
+if ! command -v flowctl >/dev/null 2>&1; then
+  err "flowctl not found on PATH"
+  echo "   Install (macOS):"
+  echo "     brew install estuary-dev/flowctl/flowctl"
+  echo "   or manual download:"
+  echo "     https://github.com/estuary/flow/releases"
+  exit 1
+fi
+FLOWCTL_VER="$(flowctl --version 2>/dev/null | head -1)"
+ok "$FLOWCTL_VER"
+
+# 3) flowctl authentication
+step "Checking flowctl authentication"
+AUTH_OUT="$(flowctl auth roles list 2>&1)"
+AUTH_STATUS=$?
+if [ $AUTH_STATUS -ne 0 ] || echo "$AUTH_OUT" | grep -qiE "unauth|no token|not.*logged|401|please.*log.*in"; then
+  err "flowctl is not authenticated"
+  echo
+  echo "   1. Get a token: https://dashboard.estuary.dev/admin/api"
+  echo "   2. Log in:      flowctl auth login --token <TOKEN>"
+  echo
+  echo "   Details:"
+  printf "${DIM}%s${RST}\n" "$AUTH_OUT" | head -5
+  exit 1
+fi
+ok "authenticated ($(echo "$AUTH_OUT" | grep -oE '[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+' | head -1 || echo 'ok'))"
+
+# 4) Pick a free port
+step "Finding free port"
+PORT="${ATLAS_PORT:-5173}"
+while (echo > "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; do
+  PORT=$((PORT + 1))
+  if [ "$PORT" -gt 5200 ]; then
+    err "Could not find a free port in range 5173–5200"
+    exit 1
+  fi
+done
+ok "using port $PORT"
+
+# 5) Verify build exists. Two possible layouts:
+#    - Tarball / installed:  $APP_DIR/build/index.js
+#    - Dev tree:             $APP_DIR/artifacts/build/index.js  (svelte.config.js: out: 'artifacts/build')
+if [ -f "$APP_DIR/build/index.js" ]; then
+  BUILD_ENTRY="$APP_DIR/build/index.js"
+elif [ -f "$APP_DIR/artifacts/build/index.js" ]; then
+  BUILD_ENTRY="$APP_DIR/artifacts/build/index.js"
+else
+  err "Build artifacts missing (looked in $APP_DIR/build/ and $APP_DIR/artifacts/build/)"
+  echo "   Run:  cd $APP_DIR && pnpm install && pnpm run build"
+  exit 1
+fi
+if [ ! -d "$APP_DIR/node_modules" ]; then
+  warn "node_modules missing — installing production deps (~1min, one-time)"
+  ( cd "$APP_DIR" && npm install --omit=dev --no-audit --no-fund --silent )
+  ok "deps installed"
+fi
+
+hr
+
+# 6) Start server
+URL="http://localhost:$PORT"
+step "Starting Estuary Atlas at $URL"
+export PORT
+export HOST=127.0.0.1
+export ORIGIN="$URL"
+export BODY_SIZE_LIMIT=Infinity
+
+cd "$APP_DIR"
+node "$BUILD_ENTRY" &
+SERVER_PID=$!
+
+cleanup() {
+  echo
+  step "Shutting down (pid=$SERVER_PID)…"
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  ok "stopped"
+}
+trap cleanup INT TERM EXIT
+
+# Wait until server is accepting connections
+for i in $(seq 1 30); do
+  if (echo > "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then break; fi
+  sleep 0.2
+done
+
+hr
+ok "Ready — opening $URL in your browser"
+echo -e "  ${DIM}(Ctrl+C to stop)${RST}"
+hr
+
+# Open browser (macOS/Linux/WSL)
+if command -v open >/dev/null 2>&1; then open "$URL"
+elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL"
+fi
+
+wait "$SERVER_PID"
