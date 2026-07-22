@@ -13,7 +13,10 @@
     "build:tarball": "bash scripts/build.sh tarball",
     "build:binary": "bash scripts/build.sh binary",
     "build:dist": "bash scripts/build.sh all",
-    "release:brew": "bash scripts/release.sh"
+    "release:brew": "bash scripts/release.sh",
+    "release:patch": "bash scripts/release.sh --patch --tag-only",
+    "release:minor": "bash scripts/release.sh --minor --tag-only",
+    "release:major": "bash scripts/release.sh --major --tag-only"
   },
   "devDependencies": {
     "@sveltejs/adapter-node": "5.2.12",
