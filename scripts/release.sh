@@ -28,26 +28,37 @@ ROOT="$(pwd)"
 
 WRITE=0
 TAG_ONLY=0
+PUSH_TAP=0
 BUMP=""
 for arg in "$@"; do
   case "$arg" in
     -w|--write)     WRITE=1 ;;
     --tag-only)     TAG_ONLY=1 ;;
+    --push-tap)     PUSH_TAP=1; WRITE=1 ;;
     --patch|--minor|--major) BUMP="${arg#--}" ;;
     -h|--help)
       cat <<'HELP'
-Usage: release.sh [--patch|--minor|--major] [-w] [--tag-only]
+Usage: release.sh [--patch|--minor|--major] [-w] [--tag-only] [--push-tap]
 
 Options:
   --patch|--minor|--major   Bump package.json version first (uses `npm version`),
                             create a git tag, and push it.
   -w, --write               After release, patch this repo's Formula/*.rb file.
-  --tag-only                Create + push the git tag only. The workflow will
-                            build & publish. Recommended for CI-driven release.
+  --push-tap                After release, ALSO clone/pull the tap repo, copy
+                            the patched formula, commit + push. Implies -w.
+                            Requires gh + write access to $TAP_REPO. This is
+                            the "do everything from my laptop" mode.
+  --tag-only                Create + push the git tag only. The GitHub Actions
+                            workflow will build & publish. Recommended when
+                            TAP_PUSH_TOKEN is configured.
 
 Env vars:
   SOURCE_REPO   default: current repo via gh (or ayyysh04z/estuary-atlas)
   TAP_REPO      default: ayyysh04z/homebrew-atlas
+  TAP_CLONE_DIR default: $HOME/.cache/estuary-atlas-tap  (persistent clone)
+
+Example — full local release, no CI needed:
+  bash scripts/release.sh --patch --push-tap
 HELP
       exit 0 ;;
   esac
@@ -149,9 +160,40 @@ if [ $WRITE -eq 1 ] && [ -f "$FORMULA" ]; then
     { print }
   ' "$FORMULA" > "$TMP"
   mv "$TMP" "$FORMULA"
-  ok "formula updated. Now commit + push to ${TAP_REPO}:"
-  echo "    cp $FORMULA <clone-of-tap>/Formula/estuary-atlas.rb"
-  echo "    cd <clone-of-tap> && git add Formula/estuary-atlas.rb && git commit -m 'release v${VERSION}' && git push"
+  ok "formula updated in this repo"
+
+  # ── Auto push-tap ────────────────────────────────────────────────────────
+  if [ $PUSH_TAP -eq 1 ]; then
+    step "Pushing formula update to ${TAP_REPO}"
+    TAP_CLONE_DIR="${TAP_CLONE_DIR:-$HOME/.cache/estuary-atlas-tap}"
+    mkdir -p "$(dirname "$TAP_CLONE_DIR")"
+
+    if [ -d "$TAP_CLONE_DIR/.git" ]; then
+      ( cd "$TAP_CLONE_DIR" && git fetch -q origin && git checkout -q main && git reset -q --hard origin/main )
+      ok "reused clone at $TAP_CLONE_DIR"
+    else
+      rm -rf "$TAP_CLONE_DIR"
+      gh repo clone "$TAP_REPO" "$TAP_CLONE_DIR" -- -q
+      ok "cloned $TAP_REPO → $TAP_CLONE_DIR"
+    fi
+
+    mkdir -p "$TAP_CLONE_DIR/Formula"
+    cp "$FORMULA" "$TAP_CLONE_DIR/Formula/estuary-atlas.rb"
+    ( cd "$TAP_CLONE_DIR"
+      if git diff --quiet Formula/estuary-atlas.rb; then
+        warn "tap already up to date (no formula changes)"
+      else
+        git add Formula/estuary-atlas.rb
+        git commit -q -m "estuary-atlas v${VERSION}"
+        git push -q origin main
+      fi
+    )
+    ok "tap pushed  →  https://github.com/${TAP_REPO}"
+    echo
+    echo "  Teammates upgrade:  brew update && brew upgrade estuary-atlas"
+  else
+    echo "    (Re-run with --push-tap to auto-push the formula to $TAP_REPO)"
+  fi
 else
   step "Next steps"
   echo "  1. Copy the version/url/sha256 lines above into Formula/estuary-atlas.rb."

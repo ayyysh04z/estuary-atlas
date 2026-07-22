@@ -86,21 +86,41 @@ Watch it run:
 gh run watch -R ayyysh04z/estuary-atlas
 ```
 
-### Option B — fully local (no Actions)
+### Option B — fully local (no Actions, no secrets)
 
-Useful when Actions is down, or for a hotfix from your laptop:
+Everything from your laptop in one command. Works when Actions is down,
+when the TAP_PUSH_TOKEN secret is not set, or for a hotfix cut on the go.
 
 ```bash
-export TAP_REPO=ayyysh04z/homebrew-atlas
-export SOURCE_REPO=ayyysh04z/estuary-atlas
+pnpm run release:local            # patch bump + tag + push + release + push tap
+# equivalent to:
+# bash scripts/release.sh --patch --push-tap
+```
 
-# Manually bump package.json version first, then:
-pnpm run release:brew -- --write
+What it does:
+1. `npm version patch` — bumps `package.json:version`, commits.
+2. Creates + pushes an annotated git tag `vX.Y.Z`.
+3. Builds `artifacts/dist/estuary-atlas-vX.Y.Z.tar.gz`.
+4. Creates a GitHub release on the source repo, uploads the tarball as an
+   asset.
+5. Patches this repo's `Formula/estuary-atlas.rb` (version + url + sha256).
+6. Clones (or pulls) the tap repo into `~/.cache/estuary-atlas-tap`, copies
+   the patched formula, commits + pushes.
 
-# Then push the patched formula to the tap:
-cd /tmp && gh repo clone ayyysh04z/homebrew-atlas
-cp ~/…/atlas/Formula/estuary-atlas.rb homebrew-atlas/Formula/
-cd homebrew-atlas && git commit -am "release vX.Y.Z" && git push
+Prerequisites: `gh auth login` (already done) + write access to both repos.
+No `TAP_PUSH_TOKEN` needed — the push uses your local `gh` credentials.
+
+Other bump levels:
+
+```bash
+bash scripts/release.sh --minor --push-tap    # 0.1.x → 0.2.0
+bash scripts/release.sh --major --push-tap    # 0.x → 1.0.0
+```
+
+For a manual (no version bump) re-cut of the current version:
+
+```bash
+bash scripts/release.sh --push-tap
 ```
 
 ---

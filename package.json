@@ -16,7 +16,8 @@
     "release:brew": "bash scripts/release.sh",
     "release:patch": "bash scripts/release.sh --patch --tag-only",
     "release:minor": "bash scripts/release.sh --minor --tag-only",
-    "release:major": "bash scripts/release.sh --major --tag-only"
+    "release:major": "bash scripts/release.sh --major --tag-only",
+    "release:local": "bash scripts/release.sh --patch --push-tap"
   },
   "devDependencies": {
     "@sveltejs/adapter-node": "5.2.12",
