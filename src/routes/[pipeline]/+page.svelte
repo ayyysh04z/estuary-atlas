@@ -39,6 +39,28 @@
     cost: { total: number; taskHourCost: number; dataVolumeCost: number | null; byocMonthlyCost: number | null; currency: string; symbol: string; fxRate: number; perTierExplanation: string; disclaimers: string[]; windowHours: number };
     docCounters: { available: boolean; note: string };
   }
+  interface UsagePayload {
+    since: string;
+    totalBytes: number;
+    totalDocs: number;
+    totalRecords: number;
+    byTask: Record<string, { bytes: number; docs: number; records?: number; error?: string }>;
+    failures: number;
+  }
+
+  function fmtBytes(v: number): string {
+    if (v >= 1e12) return `${(v / 1e12).toFixed(2)} TB`;
+    if (v >= 1e9) return `${(v / 1e9).toFixed(2)} GB`;
+    if (v >= 1e6) return `${(v / 1e6).toFixed(1)} MB`;
+    if (v >= 1e3) return `${(v / 1e3).toFixed(1)} KB`;
+    return `${v.toFixed(0)} B`;
+  }
+  function fmtDocs(v: number): string {
+    if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+    if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+    if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+    return v.toLocaleString();
+  }
   let stats = $state<StatsPayload | null>(null);
   let statsLoading = $state(false);
   let statsError = $state<string | null>(null);
@@ -52,6 +74,33 @@
   ];
   let statsSince = $state('24h');
   let statsCurrency = $state<'USD' | 'INR'>('USD');
+
+  // Pipeline data-volume aggregation (separate fetch — flowctl raw stats can
+  // be slow for chatty prod-stack captures, so we don't block the main Stats card).
+  let usage = $state<UsagePayload | null>(null);
+  let usageLoading = $state(false);
+  let usageError = $state<string | null>(null);
+
+  $effect(() => {
+    if (tab !== 'stats') return;
+    const _dep = statsSince;
+    const ac = new AbortController();
+    usage = null;
+    usageLoading = true;
+    usageError = null;
+    fetch(
+      `/api/pipeline-usage?prefix=${encodeURIComponent(data.pipeline.prefixes.source)}&since=${statsSince}`,
+      { signal: ac.signal }
+    )
+      .then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(t))))
+      .then((res: UsagePayload) => { usage = res; usageLoading = false; })
+      .catch((err) => {
+        if (ac.signal.aborted) return;
+        usageError = String(err);
+        usageLoading = false;
+      });
+    return () => ac.abort();
+  });
 
   // Publications in stats window — computed CLIENT-side from streamed data
   // (no extra flowctl calls on the server). Recomputes when since / stream change.
@@ -589,11 +638,56 @@
         <div class="sc-sub">per-task levels + search available there</div>
       </div>
       <div class="stat-card">
-        <div class="sc-label">Doc counters</div>
-        <div class="sc-value sub"><span class="dim">gated</span></div>
-        <div class="sc-sub">Estuary ops.*/stats — token lacks access</div>
+        <div class="sc-label">Data volume</div>
+        <div class="sc-value sub">
+          {#if usageLoading}<span class="dim" style="font-size:14px">loading…</span>
+          {:else if usage}{fmtBytes(usage.totalBytes)}
+          {:else if usageError}<span class="dim" style="font-size:12px">error</span>
+          {:else}<span class="dim">—</span>{/if}
+        </div>
+        <div class="sc-sub">from flowctl raw stats</div>
+      </div>
+      <div class="stat-card">
+        <div class="sc-label">Documents</div>
+        <div class="sc-value sub">
+          {#if usageLoading}<span class="dim" style="font-size:14px">loading…</span>
+          {:else if usage}{fmtDocs(usage.totalDocs)}
+          {:else}<span class="dim">—</span>{/if}
+        </div>
+        <div class="sc-sub">total across {stats.taskCount} task{stats.taskCount === 1 ? '' : 's'}</div>
       </div>
     </div>
+
+    {#if usage && Object.keys(usage.byTask).length > 0}
+      <h4 class="section-h">Data volume per task</h4>
+      <table>
+        <thead>
+          <tr>
+            <th>Task</th>
+            <th style="text-align:right">Data</th>
+            <th style="text-align:right">Docs</th>
+            <th style="text-align:right"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each Object.entries(usage.byTask).sort((a, b) => b[1].bytes - a[1].bytes) as [name, u]}
+            <tr>
+              <td class="mono-cell" style="font-size:11px">{name}</td>
+              <td class="dim mono-cell" style="text-align:right">
+                {#if u.error}<span style="color:var(--danger)">{u.error.slice(0, 40)}</span>{:else}{fmtBytes(u.bytes)}{/if}
+              </td>
+              <td class="dim mono-cell" style="text-align:right">{u.error ? '—' : fmtDocs(u.docs)}</td>
+              <td class="dim mono-cell" style="text-align:right">
+                <a href="/{data.pipeline.slug}/{encodeURIComponent(name)}">Data tab →</a>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+    {#if usageError}
+      <div class="error-box mt-lg">Pipeline usage error: {usageError}</div>
+    {/if}
 
     <h4 class="section-h">Task status</h4>
     {#if stats.taskStatuses.length === 0}
@@ -626,6 +720,7 @@
         <li>{d}</li>
       {/each}
       <li>{stats.docCounters.note}</li>
+      <li>For full breakdown per binding + graph over time, open a capture or materialization → <strong>Data</strong> tab.</li>
     </ul>
   {/if}
 {/if}

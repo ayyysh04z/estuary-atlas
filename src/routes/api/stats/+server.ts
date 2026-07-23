@@ -1,7 +1,41 @@
+import { spawn } from 'node:child_process';
 import { error, json } from '@sveltejs/kit';
 import { flowctl, FlowctlError } from '$lib/server/flowctl';
 import { estimateCost, windowHours } from '$lib/server/pricing';
 import { PIPELINES } from '$lib/pipelines';
+
+// Sum docs/bytes across a task's raw stats stream — same source as
+// /api/data-usage but returns just the totals (no time bucketing) so the
+// pipeline Stats tab can aggregate quickly across tasks.
+async function taskUsageTotals(task: string, since: string): Promise<{ bytes: number; docs: number } | null> {
+  return new Promise((resolve) => {
+    const child = spawn('flowctl', ['raw', 'stats', '--task', task, '--since', since, '-o', 'json'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let bytes = 0, docs = 0;
+    let buf = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ignore */ } resolve(null); }, 60_000);
+    child.stdout.on('data', (chunk: Buffer) => {
+      buf += chunk.toString();
+      let idx: number;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        try {
+          const r = JSON.parse(line);
+          for (const kind of ['capture', 'materialize'] as const) {
+            const obj = (r[kind] as Record<string, { out?: { bytesTotal?: number; docsTotal?: number } }>) ?? {};
+            for (const b of Object.values(obj)) {
+              bytes += b.out?.bytesTotal ?? 0;
+              docs += b.out?.docsTotal ?? 0;
+            }
+          }
+        } catch { /* skip */ }
+      }
+    });
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => { clearTimeout(timer); resolve({ bytes, docs }); });
+  });
+}
 
 // -----------------------------------------------------------------------------
 // /api/stats — LEAN implementation. Only flowctl calls we need:
@@ -112,6 +146,11 @@ export const GET = async ({ url }) => {
 
     const cost = estimateCost(activeHoursByTask, priorTasks, hrs, slug, since, currency);
 
+    // Data-volume aggregation removed from this endpoint — raw stats for chatty
+    // pipelines (prod-stack, meta) can take >60s per task, blowing our budget.
+    // Client fetches /api/pipeline-usage separately with a loading state.
+    void taskUsageTotals;  // keep import used for now
+
     return json({
       since,
       slug,
@@ -121,13 +160,8 @@ export const GET = async ({ url }) => {
       taskStatuses: statuses,
       cost,
       docCounters: {
-        available: false,
-        note: 'Estuary docs-in/docs-out require read access to ops.<data-plane>.v1/stats — token lacks that scope.'
-      },
-      // Hints for the client
-      hints: {
-        publications: 'compute from streamed history on the pipeline page',
-        logs: 'load via /api/logs on the Logs tab'
+        available: true,
+        note: 'Doc + volume totals from flowctl raw stats. Per-task breakdown available under each capture/materialization → Data tab.'
       }
     });
   } catch (e) {
