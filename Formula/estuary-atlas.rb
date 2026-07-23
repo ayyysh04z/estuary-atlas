@@ -24,9 +24,9 @@ class EstuaryAtlas < Formula
   license "MIT"
 
   # ─── Release info (bump on every release) ──────────────────────────────────
-  version "0.1.13"
-  url "https://github.com/ayyysh04z/estuary-atlas/releases/download/v0.1.13/estuary-atlas-v0.1.13.tar.gz"
-  sha256 "75cdd1e809e89b833ab1036eba9d43365bedc741d76a4978cbc05c9f17372b2f"
+  version "0.1.14"
+  url "https://github.com/ayyysh04z/estuary-atlas/releases/download/v0.1.14/estuary-atlas-v0.1.14.tar.gz"
+  sha256 "6cfbd428f2f67f68a4fd8e156213271168c692e542ee9834c5c5feee65551046"
   # ────────────────────────────────────────────────────────────────────────────
 
   depends_on "node"

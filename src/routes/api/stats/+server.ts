@@ -118,19 +118,24 @@ export const GET = async ({ url }) => {
     // Fetch shard status for each task (parallel, in-flight-deduped by flowctl wrapper).
     const statuses = (await Promise.all(tasks.map((t) => statusOf(t.catalogName)))).filter(Boolean) as TaskStatus[];
 
-    // Cost calc
-    const cutoff = cutoffFromSince(since);
+    // Cost calc.  NOTE: for since='all', cutoffFromSince returns -Infinity
+    // which used to let activeStart snap to epoch (1970) when a task lacks
+    // firstActivityAt, producing 495,788 "active hours" and ₹30 lakh nonsense.
+    // Bound the window to hrs and clamp per-task active hours to the same.
+    const rawCutoff = cutoffFromSince(since);
     const hrs = windowHours(since);
     const now = Date.now();
+    const effectiveCutoff = rawCutoff === -Infinity ? now - hrs * 3600e3 : rawCutoff;
     const activeHoursByTask: number[] = tasks.map((t) => {
       const s = statuses.find((x) => x.name === t.catalogName);
       if (!s) return hrs;
       const first = s.firstActivityAt ? Date.parse(s.firstActivityAt) : 0;
       const last = s.lastActivityAt ? Date.parse(s.lastActivityAt) : now;
-      const windowStart = cutoff === -Infinity ? 0 : cutoff;
-      const activeStart = Math.max(windowStart, first);
+      const activeStart = Math.max(effectiveCutoff, first);
       const activeEnd = Math.min(now, last);
-      return Math.max(0, (activeEnd - activeStart) / 3600e3);
+      const rawHours = Math.max(0, (activeEnd - activeStart) / 3600e3);
+      // Belt + suspenders: never exceed the window itself.
+      return Math.min(hrs, rawHours);
     });
 
     const pipeline = PIPELINES.find(
