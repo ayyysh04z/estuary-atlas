@@ -47,15 +47,38 @@ function bucketFor(tsMs: number, widthMs: number): number {
   return Math.floor(tsMs / widthMs) * widthMs;
 }
 
-async function readStats(task: string, since: string, notBefore?: string): Promise<{ records: unknown[]; err?: string }> {
+// Forward-referenced in readStatsStreaming below
+interface RawStatsRecord {
+  ts?: string;
+  capture?: Record<string, { out?: { bytesTotal?: number; docsTotal?: number } }>;
+  materialize?: Record<string, { out?: { bytesTotal?: number; docsTotal?: number } }>;
+}
+
+/**
+ * Bucket-as-we-parse: streams flowctl output, aggregates each record into
+ * `bucketMap` + `byBinding` on the fly, and NEVER retains the raw records.
+ * This keeps memory bounded — critical for chatty CDC captures where a 30d
+ * window can produce 3M+ transactions (would blow V8's ~500MB string cap).
+ */
+async function readStatsStreaming(
+  task: string,
+  since: string,
+  notBefore: string | undefined,
+  widthMs: number
+): Promise<{
+  bucketMap: Map<number, Bucket>;
+  byBinding: Record<string, { bytes: number; docs: number; txns: number }>;
+  totBytes: number; totDocs: number; totTxns: number;
+  err?: string;
+}> {
   return new Promise((resolve) => {
-    // If an explicit --not-before RFC-3339 timestamp is given we prefer it
-    // (lets the client anchor to any past date, no upper bound).
     const args = notBefore
       ? ['raw', 'stats', '--task', task, '--not-before', notBefore, '-o', 'json']
       : ['raw', 'stats', '--task', task, '--since', since, '-o', 'json'];
     const child = spawn('flowctl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const records: unknown[] = [];
+    const bucketMap = new Map<number, Bucket>();
+    const byBinding: Record<string, { bytes: number; docs: number; txns: number }> = {};
+    let totBytes = 0, totDocs = 0, totTxns = 0;
     let buf = '';
     let stderr = '';
     let done = false;
@@ -63,7 +86,7 @@ async function readStats(task: string, since: string, notBefore?: string): Promi
       if (done) return;
       done = true;
       try { child.kill('SIGKILL'); } catch { /* ignore */ }
-      resolve({ records, err });
+      resolve({ bucketMap, byBinding, totBytes, totDocs, totTxns, err });
     };
     const timer = setTimeout(() => finish(`timeout after ${TIMEOUT_MS}ms`), TIMEOUT_MS);
     child.stdout.on('data', (chunk: Buffer) => {
@@ -73,7 +96,29 @@ async function readStats(task: string, since: string, notBefore?: string): Promi
         const line = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 1);
         if (!line) continue;
-        try { records.push(JSON.parse(line)); } catch { /* skip */ }
+        try {
+          const r = JSON.parse(line) as RawStatsRecord;
+          const t = r.ts ? Date.parse(r.ts) : NaN;
+          if (isNaN(t)) continue;
+          const bucketTs = bucketFor(t, widthMs);
+          const b = bucketMap.get(bucketTs) ?? { ts: new Date(bucketTs).toISOString(), bytes: 0, docs: 0, txns: 0 };
+          let recBytes = 0, recDocs = 0;
+          for (const kind of ['capture', 'materialize'] as const) {
+            const obj = r[kind] ?? {};
+            for (const [binding, stats] of Object.entries(obj)) {
+              const rb = stats.out?.bytesTotal ?? 0;
+              const rd = stats.out?.docsTotal ?? 0;
+              recBytes += rb;
+              recDocs += rd;
+              const bb = byBinding[binding] ?? { bytes: 0, docs: 0, txns: 0 };
+              bb.bytes += rb; bb.docs += rd; bb.txns += 1;
+              byBinding[binding] = bb;
+            }
+          }
+          b.bytes += recBytes; b.docs += recDocs; b.txns += 1;
+          bucketMap.set(bucketTs, b);
+          totBytes += recBytes; totDocs += recDocs; totTxns += 1;
+        } catch { /* skip malformed line */ }
       }
     });
     child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
@@ -82,13 +127,7 @@ async function readStats(task: string, since: string, notBefore?: string): Promi
   });
 }
 
-interface RawStatsRecord {
-  ts?: string;
-  capture?: Record<string, { out?: { bytesTotal?: number; docsTotal?: number } }>;
-  materialize?: Record<string, { out?: { bytesTotal?: number; docsTotal?: number } }>;
-}
-
-export const GET = async ({ url }) => {
+export const GET = async ({ url, request }) => {
   const task = url.searchParams.get('task');
   const since = url.searchParams.get('since') ?? '24h';
   const notBefore = url.searchParams.get('notBefore') ?? undefined;   // RFC-3339
@@ -104,62 +143,36 @@ export const GET = async ({ url }) => {
 
   const key = `${task}|${notBefore ?? since}|${bucket}`;
   const now = Date.now();
-  const hit = cache.get(key);
-  if (hit && now - hit.at < CACHE_TTL_MS) return json({ ...hit.value, cached: true, cacheAgeMs: now - hit.at });
-  const pending = inflight.get(key);
-  if (pending) return json(await pending);
+  // Ctrl+Shift+R / DevTools "Disable cache" sends Cache-Control: no-cache.
+  // Also honour ?nocache=1 for explicit refresh from the UI.
+  const noCache = request.headers.get('cache-control')?.includes('no-cache')
+    || request.headers.get('pragma') === 'no-cache'
+    || url.searchParams.get('nocache') === '1';
+  if (!noCache) {
+    const hit = cache.get(key);
+    if (hit && now - hit.at < CACHE_TTL_MS) return json({ ...hit.value, cached: true, cacheAgeMs: now - hit.at });
+    const pending = inflight.get(key);
+    if (pending) return json(await pending);
+  }
+
+  const widthMs = bucketMs(bucket);
 
   const promise = (async () => {
-    const { records, err } = await readStats(task, notBefore ? '30d' : since, notBefore);
-    if (err) throw new Error(err);
-    return { records };
+    const r = await readStatsStreaming(task, notBefore ? '30d' : since, notBefore, widthMs);
+    if (r.err) throw new Error(r.err);
+    return r;
   })();
   inflight.set(key, promise as unknown as Promise<StatsResult>);
-  let records: unknown[] = [];
+  let aggregated;
   try {
-    const r = await promise;
-    records = (r as unknown as { records: unknown[] }).records;
+    aggregated = await promise;
   } catch (e) {
     inflight.delete(key);
     return json({ error: e instanceof Error ? e.message : String(e), task, since, bucket }, { status: 502 });
   } finally {
     inflight.delete(key);
   }
-
-  const widthMs = bucketMs(bucket);
-  const bucketMap = new Map<number, Bucket>();
-  const byBinding: Record<string, { bytes: number; docs: number; txns: number }> = {};
-  let totBytes = 0, totDocs = 0, totTxns = 0;
-
-  for (const rec of records) {
-    const r = rec as RawStatsRecord;
-    const t = r.ts ? Date.parse(r.ts) : NaN;
-    if (isNaN(t)) continue;
-    const bucketTs = bucketFor(t, widthMs);
-    const buckets = bucketMap.get(bucketTs) ?? { ts: new Date(bucketTs).toISOString(), bytes: 0, docs: 0, txns: 0 };
-    let recBytes = 0, recDocs = 0;
-    for (const kind of ['capture', 'materialize'] as const) {
-      const obj = r[kind] ?? {};
-      for (const [binding, stats] of Object.entries(obj)) {
-        const b = stats.out?.bytesTotal ?? 0;
-        const d = stats.out?.docsTotal ?? 0;
-        recBytes += b;
-        recDocs += d;
-        const bb = byBinding[binding] ?? { bytes: 0, docs: 0, txns: 0 };
-        bb.bytes += b;
-        bb.docs += d;
-        bb.txns += 1;
-        byBinding[binding] = bb;
-      }
-    }
-    buckets.bytes += recBytes;
-    buckets.docs += recDocs;
-    buckets.txns += 1;
-    bucketMap.set(bucketTs, buckets);
-    totBytes += recBytes;
-    totDocs += recDocs;
-    totTxns += 1;
-  }
+  const { bucketMap, byBinding, totBytes, totDocs, totTxns } = aggregated;
 
   // Fill missing buckets with zeros so the chart renders a proper timeline
   const nowMs = Date.now();
@@ -187,7 +200,7 @@ export const GET = async ({ url }) => {
     total: { bytes: totBytes, docs: totDocs, txns: totTxns },
     byBinding,
     series,
-    fetchedRecords: records.length
+    fetchedRecords: totTxns
   };
   cache.set(key, { at: now, value: result });
   return json(result);

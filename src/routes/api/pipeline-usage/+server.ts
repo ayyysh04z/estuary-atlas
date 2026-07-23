@@ -62,19 +62,22 @@ const TTL_MS = 15 * 60_000;  // 15 min
 // share one flowctl run instead of spawning duplicates.
 const inflight = new Map<string, Promise<unknown>>();
 
-export const GET = async ({ url }) => {
+export const GET = async ({ url, request }) => {
   const prefix = url.searchParams.get('prefix');
   const since = url.searchParams.get('since') ?? '24h';
   if (!prefix) throw error(400, 'missing prefix');
 
   const key = `${prefix}|${since}`;
   const now = Date.now();
-  const hit = cache.get(key);
-  if (hit && now - hit.at < TTL_MS) return json({ ...(hit.value as object), cached: true, cacheAgeMs: now - hit.at });
-
-  // Dedupe concurrent calls
-  const pending = inflight.get(key);
-  if (pending) return json(await pending);
+  const noCache = request.headers.get('cache-control')?.includes('no-cache')
+    || request.headers.get('pragma') === 'no-cache'
+    || url.searchParams.get('nocache') === '1';
+  if (!noCache) {
+    const hit = cache.get(key);
+    if (hit && now - hit.at < TTL_MS) return json({ ...(hit.value as object), cached: true, cacheAgeMs: now - hit.at });
+    const pending = inflight.get(key);
+    if (pending) return json(await pending);
+  }
 
   const compute = (async () => {
   const rawSince = since === 'all' ? '30d' : since;
