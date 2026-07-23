@@ -593,9 +593,15 @@
   {:else if usage}
     <div class="usage-cards">
       <div class="usage-card">
-        <div class="uc-label">Total data {specKind === 'capture' ? 'in' : 'read'}</div>
+        <div class="uc-label">
+          {specKind === 'capture' ? 'Data written to Flow' : 'Data read from Flow'}
+        </div>
         <div class="uc-value">{fmtBytes(usage.total.bytes)}</div>
-        <div class="uc-sub">over {usage.since}</div>
+        <div class="uc-sub">
+          {specKind === 'capture'
+            ? 'Bytes this capture pushed INTO its collections'
+            : 'Bytes this materialization pulled FROM its source collections'}
+        </div>
       </div>
       <div class="usage-card">
         <div class="uc-label">Total documents</div>
@@ -609,11 +615,21 @@
       </div>
     </div>
 
-    <div style="margin: 20px 0 8px">
+    <div class="chart-header">
+      <span class="chart-dot" style="background:{specKind === 'capture' ? '#7fbfff' : '#ffb547'}"></span>
+      <span class="chart-title">
+        {specKind === 'capture'
+          ? (usageMetric === 'bytes' ? 'Data written to Flow' : 'Documents written to Flow')
+          : (usageMetric === 'bytes' ? 'Data read from Flow' : 'Documents read from Flow')}
+      </span>
+      <span class="chart-help muted small">· bucket {usage.bucket} · hover a bar for exact value</span>
+    </div>
+    <div style="margin: 0 0 8px">
       <BarChart
         series={usage.series}
         valueKey={usageMetric}
         format={usageMetric === 'bytes' ? fmtBytes : fmtDocs}
+        color={specKind === 'capture' ? '#7fbfff' : '#ffb547'}
       />
     </div>
 
@@ -784,4 +800,16 @@
     color-scheme: dark;
   }
   .date-input:focus { border-color: var(--accent); outline: none; }
+  .chart-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px 8px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    margin-top: 20px;
+  }
+  .chart-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .chart-title { color: var(--text); font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
+  .chart-help { margin-left: auto; }
 </style>

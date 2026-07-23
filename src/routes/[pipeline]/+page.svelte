@@ -646,54 +646,106 @@
         <div class="sc-sub">per-task levels + search available there</div>
       </div>
       <div class="stat-card">
-        <div class="sc-label">Data volume</div>
+        <div class="sc-label">Data pushed IN by sources</div>
         <div class="sc-value sub">
           {#if usageLoading}<span class="dim" style="font-size:14px">loading…</span>
-          {:else if usage}{fmtBytes(usage.totalBytes)}
+          {:else if usage}
+            {@const inBytes = Object.entries(usage.byTask).filter(([n]) => data.captures.some(c => c.catalogName === n)).reduce((s, [, u]) => s + u.bytes, 0)}
+            {fmtBytes(inBytes)}
           {:else if usageError}<span class="dim" style="font-size:12px">error</span>
           {:else}<span class="dim">—</span>{/if}
         </div>
         <div class="sc-sub">
-          from flowctl raw stats{#if usage && 'cached' in usage && (usage as {cached?: boolean}).cached} · <span style="color:var(--accent)">cached</span>{/if}
+          <span class="legend-dot" style="background:#7fbfff"></span> written to Flow{#if usage && 'cached' in usage && (usage as {cached?: boolean}).cached} · <span style="color:var(--accent)">cached</span>{/if}
         </div>
       </div>
       <div class="stat-card">
-        <div class="sc-label">Documents</div>
+        <div class="sc-label">Data read OUT by destinations</div>
         <div class="sc-value sub">
           {#if usageLoading}<span class="dim" style="font-size:14px">loading…</span>
-          {:else if usage}{fmtDocs(usage.totalDocs)}
+          {:else if usage}
+            {@const outBytes = Object.entries(usage.byTask).filter(([n]) => data.materializations.some(m => m.catalogName === n)).reduce((s, [, u]) => s + u.bytes, 0)}
+            {fmtBytes(outBytes)}
           {:else}<span class="dim">—</span>{/if}
         </div>
-        <div class="sc-sub">total across {stats.taskCount} task{stats.taskCount === 1 ? '' : 's'}</div>
+        <div class="sc-sub">
+          <span class="legend-dot" style="background:#ffb547"></span> read from Flow · {stats.taskCount} tasks
+        </div>
       </div>
     </div>
 
     {#if usage && Object.keys(usage.byTask).length > 0}
-      <h4 class="section-h">Data volume per task</h4>
-      <table>
-        <thead>
-          <tr>
-            <th>Task</th>
-            <th style="text-align:right">Data</th>
-            <th style="text-align:right">Docs</th>
-            <th style="text-align:right"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each Object.entries(usage.byTask).sort((a, b) => b[1].bytes - a[1].bytes) as [name, u]}
+      {@const captureNames = new Set(data.captures.map(c => c.catalogName))}
+      {@const sourceEntries = Object.entries(usage.byTask).filter(([n]) => captureNames.has(n)).sort((a, b) => b[1].bytes - a[1].bytes)}
+      {@const destEntries = Object.entries(usage.byTask).filter(([n]) => !captureNames.has(n)).sort((a, b) => b[1].bytes - a[1].bytes)}
+      {@const totalIn = sourceEntries.reduce((s, [, u]) => s + u.bytes, 0)}
+      {@const totalOut = destEntries.reduce((s, [, u]) => s + u.bytes, 0)}
+
+      <h4 class="section-h">
+        <span class="legend-dot" style="background:#7fbfff"></span>
+        Sources — data written INTO Flow · {fmtBytes(totalIn)}
+      </h4>
+      {#if sourceEntries.length === 0}
+        <p class="muted small">no capture tasks</p>
+      {:else}
+        <table>
+          <thead>
             <tr>
-              <td class="mono-cell" style="font-size:11px">{name}</td>
-              <td class="dim mono-cell" style="text-align:right">
-                {#if u.error}<span style="color:var(--danger)">{u.error.slice(0, 40)}</span>{:else}{fmtBytes(u.bytes)}{/if}
-              </td>
-              <td class="dim mono-cell" style="text-align:right">{u.error ? '—' : fmtDocs(u.docs)}</td>
-              <td class="dim mono-cell" style="text-align:right">
-                <a href="/{data.pipeline.slug}/{encodeURIComponent(name)}">Data tab →</a>
-              </td>
+              <th>Capture</th>
+              <th style="text-align:right">Data in</th>
+              <th style="text-align:right">Docs in</th>
+              <th style="text-align:right"></th>
             </tr>
-          {/each}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {#each sourceEntries as [name, u]}
+              <tr>
+                <td class="mono-cell" style="font-size:11px">{name}</td>
+                <td class="dim mono-cell" style="text-align:right">
+                  {#if u.error}<span style="color:var(--danger)">{u.error.slice(0, 40)}</span>{:else}{fmtBytes(u.bytes)}{/if}
+                </td>
+                <td class="dim mono-cell" style="text-align:right">{u.error ? '—' : fmtDocs(u.docs)}</td>
+                <td class="dim mono-cell" style="text-align:right">
+                  <a href="/{data.pipeline.slug}/{encodeURIComponent(name)}">Data tab →</a>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+      <h4 class="section-h" style="margin-top:20px">
+        <span class="legend-dot" style="background:#ffb547"></span>
+        Destinations — data read FROM Flow · {fmtBytes(totalOut)}
+      </h4>
+      {#if destEntries.length === 0}
+        <p class="muted small">no materialization tasks</p>
+      {:else}
+        <table>
+          <thead>
+            <tr>
+              <th>Materialization</th>
+              <th style="text-align:right">Data out</th>
+              <th style="text-align:right">Docs out</th>
+              <th style="text-align:right"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each destEntries as [name, u]}
+              <tr>
+                <td class="mono-cell" style="font-size:11px">{name}</td>
+                <td class="dim mono-cell" style="text-align:right">
+                  {#if u.error}<span style="color:var(--danger)">{u.error.slice(0, 40)}</span>{:else}{fmtBytes(u.bytes)}{/if}
+                </td>
+                <td class="dim mono-cell" style="text-align:right">{u.error ? '—' : fmtDocs(u.docs)}</td>
+                <td class="dim mono-cell" style="text-align:right">
+                  <a href="/{data.pipeline.slug}/{encodeURIComponent(name)}">Data tab →</a>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
     {/if}
     {#if usageError}
       <div class="error-box mt-lg">Pipeline usage error: {usageError}</div>
@@ -858,4 +910,5 @@
   }
   ul.notes { margin: 0; padding-left: 20px; line-height: 1.6; }
   ul.notes li { margin-bottom: 6px; }
+  .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
 </style>
