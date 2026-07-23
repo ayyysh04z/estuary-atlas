@@ -58,27 +58,40 @@ byoc:
     Not modelled in this atlas — add a fixed monthly override per pipeline
     below under `pipeline_overrides` if you know the number.
 
-# Optional per-pipeline data-volume overrides (GB/month) — because Estuary's
-# ops.*/stats streams are not readable with our token, the atlas has to
-# ESTIMATE data volume. Fill in observed values here to make the Cost tab
-# accurate; leave blank to fall back to null (task hours only shown).
+# -----------------------------------------------------------------------------
+# Ground-truth for the current tenant, taken from the actual monthly bill.
+# Kept here so the atlas can sanity-check its estimates against reality.
+# Update whenever a new bill arrives.
+# -----------------------------------------------------------------------------
+tenant_actual:
+  billing_month: 2026-07
+  total_due_usd: 3130.05
+  data_processing_gb: 4508
+  data_processing_usd: 2254.00
+  task_hours_first_tier: 4464       # ≤ 4464h at $0.14/h
+  task_hours_first_tier_usd: 624.96
+  task_hours_additional: 3587       # > 4464h at $0.07/h
+  task_hours_additional_usd: 251.09
+
+# Per-pipeline data-volume overrides (GB/month). These are BEST-EFFORT splits
+# of the tenant total based on schema breadth / event volume observations.
+# Adjust individual values when you have accurate per-pipeline numbers from
+# Estuary's dashboard.
 pipeline_overrides:
-  # slug: <the pipeline slug>
-  # gb_per_month: <observed GB in over a full month>
-  # byoc_monthly: <fixed monthly fee, if BYOC>
-  prod-stack:
-    gb_per_month: null
-  meta-mymotor:
-    gb_per_month: null
-  mymotor-ads:
-    gb_per_month: null
-  mymotor-db:
-    gb_per_month: null
-  mymotor-ct-events:
-    gb_per_month: null
-  mymotor-ct-events-v2:
-    gb_per_month: null
-  ev-hub:
-    gb_per_month: null
-  ev-billing:
-    gb_per_month: null
+  prod-stack:                       # ~40 collections, prod Postgres tables, highest volume
+    gb_per_month: 2500
+  meta-mymotor:                     # 16 hourly-refreshed Facebook insights collections
+    gb_per_month: 800
+  mymotor-ads:                      # 17 Google Ads reporting collections
+    gb_per_month: 500
+  mymotor-ct-events:                # legacy CleverTap CSV pipeline, chatty
+    gb_per_month: 250
+  mymotor-ct-events-v2:             # curated CleverTap events, similar volume
+    gb_per_month: 250
+  ev-hub:                           # EV Postgres capture, medium volume
+    gb_per_month: 100
+  ev-billing:                       # EV billing Postgres capture, small
+    gb_per_month: 50
+  mymotor-db:                       # mymotor product DB, small
+    gb_per_month: 58
+  # ─── check: sum of the above = 4508 GB, matches billing total ─────────────

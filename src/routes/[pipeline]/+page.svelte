@@ -32,15 +32,12 @@
   interface StatsPayload {
     since: string;
     slug: string;
-    specs: number;
     taskCount: number;
-    publicationsInWindow: number;
-    humanPublications: number;
-    botPublications: number;
-    taskStatuses: Array<{ name: string; ok: boolean; summary: string; lastActivityAt?: string; recentFailureCount?: number }>;
-    logs: { errorCount: number; warnCount: number; fatalCount: number; infoCount: number };
+    captureCount: number;
+    materializationCount: number;
+    taskStatuses: Array<{ name: string; ok: boolean; summary: string; lastActivityAt?: string; firstActivityAt?: string; recentFailureCount?: number }>;
     cost: { total: number; taskHourCost: number; dataVolumeCost: number | null; byocMonthlyCost: number | null; currency: string; symbol: string; fxRate: number; perTierExplanation: string; disclaimers: string[]; windowHours: number };
-    docCounts: { note: string };
+    docCounters: { available: boolean; note: string };
   }
   let stats = $state<StatsPayload | null>(null);
   let statsLoading = $state(false);
@@ -55,6 +52,36 @@
   ];
   let statsSince = $state('24h');
   let statsCurrency = $state<'USD' | 'INR'>('USD');
+
+  // Publications in stats window — computed CLIENT-side from streamed data
+  // (no extra flowctl calls on the server). Recomputes when since / stream change.
+  const statsPubCounts = $derived.by(() => {
+    const cutoff = (() => {
+      if (statsSince === 'all') return -Infinity;
+      const m = statsSince.match(/^(\d+)([hdw])$/i);
+      if (!m) return -Infinity;
+      const n = parseInt(m[1], 10);
+      const unit = m[2].toLowerCase();
+      const ms = unit === 'h' ? 3600e3 : unit === 'd' ? 86400e3 : 7 * 86400e3;
+      return Date.now() - n * ms;
+    })();
+    const seen = new Set<string>();
+    let total = 0, human = 0, bot = 0;
+    for (const events of Object.values(streamed.historyByName)) {
+      for (const e of events ?? []) {
+        const pub = (e.publication ?? {}) as Record<string, unknown>;
+        const id = String(pub.publicationId ?? '');
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const t = Date.parse(String(pub.publishedAt ?? ''));
+        if (isNaN(t) || t < cutoff) continue;
+        total++;
+        const email = String(pub.userEmail ?? '');
+        if (email.endsWith('@estuary.dev')) bot++; else human++;
+      }
+    }
+    return { total, human, bot };
+  });
 
   $effect(() => {
     if (tab !== 'stats') return;
@@ -547,21 +574,19 @@
       </div>
       <div class="stat-card">
         <div class="sc-label">Publications</div>
-        <div class="sc-value sub">{stats.publicationsInWindow}</div>
-        <div class="sc-sub">{stats.humanPublications} human · {stats.botPublications} bot</div>
-      </div>
-      <div class="stat-card">
-        <div class="sc-label">Log activity</div>
-        <div class="sc-value sub">
-          {#if stats.logs.errorCount + stats.logs.fatalCount > 0}
-            <span style="color:var(--danger)">{stats.logs.errorCount + stats.logs.fatalCount}</span>
+        <div class="sc-value sub">{streamed.ready ? statsPubCounts.total : '…'}</div>
+        <div class="sc-sub">
+          {#if streamed.ready}
+            {statsPubCounts.human} human · {statsPubCounts.bot} bot
           {:else}
-            <span style="color:var(--ok)">clean</span>
+            <span class="dim">loading history…</span>
           {/if}
         </div>
-        <div class="sc-sub">
-          {stats.logs.fatalCount} fatal · {stats.logs.errorCount} err · {stats.logs.warnCount} warn · {stats.logs.infoCount} info
-        </div>
+      </div>
+      <div class="stat-card">
+        <div class="sc-label">Logs</div>
+        <div class="sc-value sub"><a href="#" onclick={(e) => { e.preventDefault(); tab = 'logs'; }}>open Logs tab</a></div>
+        <div class="sc-sub">per-task levels + search available there</div>
       </div>
       <div class="stat-card">
         <div class="sc-label">Doc counters</div>
