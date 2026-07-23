@@ -1,0 +1,84 @@
+# -----------------------------------------------------------------------------
+# Estuary pricing (per https://docs.estuary.dev/getting-started/pricing/)
+# Last verified: 2026-07-23
+#
+# When Estuary updates their pricing, edit this file — the atlas Cost tab
+# reads it at request time so no code changes are needed.
+# -----------------------------------------------------------------------------
+
+currency: USD
+notes: All prices in USD. Task hours are per-connector (one capture OR one materialization).
+
+# FX rates for atlas UI toggle. Update rate when it drifts more than a few
+# percent. Source and timestamp are informational — the atlas uses `rate`.
+fx:
+  base: USD
+  rates:
+    INR:
+      rate: 96.84
+      symbol: ₹
+      source: Morningstar
+      as_of: 2026-07-23T18:04:00Z
+
+# Data movement charge
+data_volume:
+  price_per_gb: 0.50
+  # Materializations meter the volume READ from the collection, not written to
+  # the destination. Captures meter volume WRITTEN into the collection.
+  applies_to: [capture_in, materialization_read]
+
+# Task hours (i.e. active connector time)
+task_hours:
+  # First 6 tasks per account cost $100/month = $0.14/hour
+  first_tier:
+    tasks: 6
+    monthly_price_per_task: 100
+    hourly_price_per_task: 0.14  # 100 / 720 rounded
+  # Beyond the first 6, additional tasks cost $50/month = $0.07/hour
+  additional_tier:
+    monthly_price_per_task: 50
+    hourly_price_per_task: 0.07
+  # Estuary uses 720 hours/month as the standard conversion
+  hours_per_month: 720
+
+# Free tier
+free_plan:
+  connectors_max: 2
+  gb_per_month_max: 10
+
+# Free trial (after free-plan limits are exceeded)
+free_trial_days: 30
+
+# Private / BYOC deployments — variable, contact sales
+byoc:
+  requires_annual_plan: true
+  base_fee_monthly: null
+  note: >
+    BYOC costs depend on cloud provider, region, and dedicated management.
+    Not modelled in this atlas — add a fixed monthly override per pipeline
+    below under `pipeline_overrides` if you know the number.
+
+# Optional per-pipeline data-volume overrides (GB/month) — because Estuary's
+# ops.*/stats streams are not readable with our token, the atlas has to
+# ESTIMATE data volume. Fill in observed values here to make the Cost tab
+# accurate; leave blank to fall back to null (task hours only shown).
+pipeline_overrides:
+  # slug: <the pipeline slug>
+  # gb_per_month: <observed GB in over a full month>
+  # byoc_monthly: <fixed monthly fee, if BYOC>
+  prod-stack:
+    gb_per_month: null
+  meta-mymotor:
+    gb_per_month: null
+  mymotor-ads:
+    gb_per_month: null
+  mymotor-db:
+    gb_per_month: null
+  mymotor-ct-events:
+    gb_per_month: null
+  mymotor-ct-events-v2:
+    gb_per_month: null
+  ev-hub:
+    gb_per_month: null
+  ev-billing:
+    gb_per_month: null

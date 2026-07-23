@@ -26,7 +26,55 @@
     return () => { cancelled = true; };
   });
 
-  let tab = $state<'overview' | 'collections' | 'bindings' | 'history' | 'logs'>('overview');
+  let tab = $state<'overview' | 'collections' | 'bindings' | 'history' | 'logs' | 'stats'>('overview');
+
+  // ─── Stats tab ────────────────────────────────────────────────────────────
+  interface StatsPayload {
+    since: string;
+    slug: string;
+    specs: number;
+    taskCount: number;
+    publicationsInWindow: number;
+    humanPublications: number;
+    botPublications: number;
+    taskStatuses: Array<{ name: string; ok: boolean; summary: string; lastActivityAt?: string; recentFailureCount?: number }>;
+    logs: { errorCount: number; warnCount: number; fatalCount: number; infoCount: number };
+    cost: { total: number; taskHourCost: number; dataVolumeCost: number | null; byocMonthlyCost: number | null; currency: string; symbol: string; fxRate: number; perTierExplanation: string; disclaimers: string[]; windowHours: number };
+    docCounts: { note: string };
+  }
+  let stats = $state<StatsPayload | null>(null);
+  let statsLoading = $state(false);
+  let statsError = $state<string | null>(null);
+  const STATS_RANGES = [
+    { label: '1h', value: '1h' },
+    { label: '24h', value: '24h' },
+    { label: '3d', value: '3d' },
+    { label: '7d', value: '7d' },
+    { label: '30d', value: '30d' },
+    { label: 'all', value: 'all' }
+  ];
+  let statsSince = $state('24h');
+  let statsCurrency = $state<'USD' | 'INR'>('USD');
+
+  $effect(() => {
+    if (tab !== 'stats') return;
+    const _dep1 = statsSince; const _dep2 = statsCurrency;
+    const ac = new AbortController();
+    statsLoading = true;
+    statsError = null;
+    fetch(
+      `/api/stats?prefix=${encodeURIComponent(data.pipeline.prefixes.source)}&since=${statsSince}&currency=${statsCurrency}`,
+      { signal: ac.signal }
+    )
+      .then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(t))))
+      .then((res: StatsPayload) => { stats = res; statsLoading = false; })
+      .catch((err) => {
+        if (ac.signal.aborted) return;
+        statsError = String(err);
+        statsLoading = false;
+      });
+    return () => ac.abort();
+  });
 
   interface EnrichedSpec {
     name: string;
@@ -219,6 +267,7 @@
     History · {streamed.ready ? grouped.length : '…'}
   </button>
   <button class:active={tab === 'logs'} onclick={() => (tab = 'logs')}>Logs</button>
+  <button class:active={tab === 'stats'} onclick={() => (tab = 'stats')}>Stats</button>
   {#if !streamed.ready}
     <span class="tab-loading">
       <span class="pulse-dot"></span>
@@ -430,6 +479,130 @@
       {/each}
     </div>
   {/if}
+{:else if tab === 'stats'}
+  <div class="filter-bar">
+    <div class="range-pills">
+      <span class="range-lbl">since:</span>
+      {#each STATS_RANGES as r}
+        <button
+          type="button"
+          class="range-pill"
+          class:on={statsSince === r.value}
+          onclick={() => (statsSince = r.value)}
+        >{r.label}</button>
+      {/each}
+    </div>
+    <div class="range-pills">
+      <span class="range-lbl">currency:</span>
+      <button
+        type="button"
+        class="range-pill"
+        class:on={statsCurrency === 'USD'}
+        onclick={() => (statsCurrency = 'USD')}
+      >USD $</button>
+      <button
+        type="button"
+        class="range-pill"
+        class:on={statsCurrency === 'INR'}
+        onclick={() => (statsCurrency = 'INR')}
+      >INR ₹</button>
+    </div>
+    <span class="muted small" style="margin-left:auto">
+      {#if statsLoading}loading…{:else if stats}{stats.taskCount} tasks · {stats.specs} specs{/if}
+    </span>
+  </div>
+
+  {#if statsLoading && !stats}
+    <Skeleton rows={6} height="60px" />
+  {:else if statsError}
+    <div class="error-box">{statsError}</div>
+  {:else if stats}
+    <div class="stats-grid">
+      <div class="stat-card cost">
+        <div class="sc-label">Estimated cost · {stats.cost.windowHours}h window</div>
+        <div class="sc-value">{stats.cost.symbol}{stats.cost.total.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+        <div class="sc-sub">{stats.cost.perTierExplanation}</div>
+      </div>
+      <div class="stat-card">
+        <div class="sc-label">Task-hour cost</div>
+        <div class="sc-value sub">{stats.cost.symbol}{stats.cost.taskHourCost.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+        <div class="sc-sub">{stats.taskCount} tasks × {stats.cost.windowHours} hours</div>
+      </div>
+      <div class="stat-card">
+        <div class="sc-label">Data volume cost</div>
+        <div class="sc-value sub">
+          {#if stats.cost.dataVolumeCost != null}
+            {stats.cost.symbol}{stats.cost.dataVolumeCost.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+          {:else}
+            <span class="dim">n/a</span>
+          {/if}
+        </div>
+        <div class="sc-sub">
+          {#if stats.cost.dataVolumeCost == null}
+            set <code>gb_per_month</code> in <code>data/pricing.yaml</code>
+          {:else}
+            estimated from override
+          {/if}
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="sc-label">Publications</div>
+        <div class="sc-value sub">{stats.publicationsInWindow}</div>
+        <div class="sc-sub">{stats.humanPublications} human · {stats.botPublications} bot</div>
+      </div>
+      <div class="stat-card">
+        <div class="sc-label">Log activity</div>
+        <div class="sc-value sub">
+          {#if stats.logs.errorCount + stats.logs.fatalCount > 0}
+            <span style="color:var(--danger)">{stats.logs.errorCount + stats.logs.fatalCount}</span>
+          {:else}
+            <span style="color:var(--ok)">clean</span>
+          {/if}
+        </div>
+        <div class="sc-sub">
+          {stats.logs.fatalCount} fatal · {stats.logs.errorCount} err · {stats.logs.warnCount} warn · {stats.logs.infoCount} info
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="sc-label">Doc counters</div>
+        <div class="sc-value sub"><span class="dim">gated</span></div>
+        <div class="sc-sub">Estuary ops.*/stats — token lacks access</div>
+      </div>
+    </div>
+
+    <h4 class="section-h">Task status</h4>
+    {#if stats.taskStatuses.length === 0}
+      <p class="muted small">no task statuses returned</p>
+    {:else}
+      <table>
+        <thead>
+          <tr><th>Task</th><th>Status</th><th>Last activity</th><th>Recent failures</th></tr>
+        </thead>
+        <tbody>
+          {#each stats.taskStatuses as t}
+            <tr>
+              <td class="mono-cell">{t.name}</td>
+              <td>
+                <span class="chip {t.ok ? 'default' : 'danger'}" style="font-size:9.5px">
+                  {t.summary || (t.ok ? 'OK' : 'ERROR')}
+                </span>
+              </td>
+              <td class="dim">{t.lastActivityAt ? new Date(t.lastActivityAt).toISOString().slice(0, 19) : '—'}</td>
+              <td class="dim">{t.recentFailureCount ?? 0}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+
+    <h4 class="section-h">Notes</h4>
+    <ul class="dim small notes">
+      {#each stats.cost.disclaimers as d}
+        <li>{d}</li>
+      {/each}
+      <li>{stats.docCounts.note}</li>
+    </ul>
+  {/if}
 {/if}
 
 <style>
@@ -490,4 +663,69 @@
     color: var(--accent);
     border-color: var(--accent);
   }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 16px 18px;
+    min-height: 100px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .stat-card.cost {
+    border-color: var(--accent);
+    background: rgba(208, 255, 63, 0.04);
+  }
+  .stat-card .sc-label {
+    color: var(--text-dim);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .stat-card .sc-value {
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+  }
+  .stat-card.cost .sc-value { color: var(--accent); font-size: 30px; }
+  .stat-card .sc-value.sub { font-size: 22px; }
+  .stat-card .sc-value .dim { color: var(--text-mute); font-size: 14px; font-weight: 500; }
+  .stat-card .sc-sub {
+    color: var(--text-mute);
+    font-size: 10.5px;
+    line-height: 1.5;
+    margin-top: auto;
+    font-family: var(--font-mono);
+  }
+  .stat-card .sc-sub code {
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    padding: 1px 5px;
+    font-size: 10px;
+    color: var(--accent);
+    border-radius: 2px;
+  }
+  .section-h {
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 600;
+    margin: 24px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  ul.notes { margin: 0; padding-left: 20px; line-height: 1.6; }
+  ul.notes li { margin-bottom: 6px; }
 </style>
