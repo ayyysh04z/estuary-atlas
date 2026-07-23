@@ -4,6 +4,7 @@
   import SchemaView from '$lib/components/SchemaView.svelte';
   import BindingsTable from '$lib/components/BindingsTable.svelte';
   import KeyValue from '$lib/components/KeyValue.svelte';
+  import BarChart from '$lib/components/BarChart.svelte';
   import { extractSpecBody } from '$lib/chips';
   import { diffModels, groupByTopLevel, formatPath, type DiffEntry } from '$lib/diff';
   import { flattenSchema } from '$lib/schema';
@@ -11,7 +12,7 @@
 
   let { data }: PageProps = $props();
 
-  let tab = $state<'model' | 'history' | 'diff' | 'schema' | 'sample'>('model');
+  let tab = $state<'model' | 'history' | 'diff' | 'schema' | 'sample' | 'data'>('model');
 
   function pubId(e: HistoryEvent): string {
     const p = (e.publication ?? {}) as Record<string, unknown>;
@@ -133,6 +134,63 @@
   const humanCount = $derived(data.events.filter((e) => !fmtUser(e).endsWith('@estuary.dev')).length);
   const botCount = $derived(data.events.filter((e) => fmtUser(e).endsWith('@estuary.dev')).length);
 
+  // ─── Data-usage tab (Estuary raw stats) ───────────────────────────────────
+  interface UsageBucket { ts: string; bytes: number; docs: number; txns: number }
+  interface UsagePayload {
+    task: string;
+    since: string;
+    bucket: string;
+    total: { bytes: number; docs: number; txns: number };
+    byBinding: Record<string, { bytes: number; docs: number; txns: number }>;
+    series: UsageBucket[];
+    fetchedRecords: number;
+  }
+  let usage = $state<UsagePayload | null>(null);
+  let usageLoading = $state(false);
+  let usageError = $state<string | null>(null);
+  let usageSince = $state('7d');
+  let usageMetric = $state<'bytes' | 'docs'>('bytes');
+  const USAGE_RANGES = [
+    { label: '24h', value: '24h' },
+    { label: '7d', value: '7d' },
+    { label: '30d', value: '30d' }
+  ];
+
+  $effect(() => {
+    if (tab !== 'data') return;
+    if (specKind !== 'capture' && specKind !== 'materialization') return;
+    const _dep = usageSince;
+    const ac = new AbortController();
+    usageLoading = true;
+    usageError = null;
+    fetch(`/api/data-usage?task=${encodeURIComponent(data.specName)}&since=${usageSince}`, { signal: ac.signal })
+      .then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(t))))
+      .then((res: UsagePayload) => {
+        usage = res;
+        usageLoading = false;
+      })
+      .catch((err) => {
+        if (ac.signal.aborted) return;
+        usageError = String(err);
+        usageLoading = false;
+      });
+    return () => ac.abort();
+  });
+
+  function fmtBytes(v: number): string {
+    if (v >= 1e12) return `${(v / 1e12).toFixed(2)} TB`;
+    if (v >= 1e9) return `${(v / 1e9).toFixed(2)} GB`;
+    if (v >= 1e6) return `${(v / 1e6).toFixed(1)} MB`;
+    if (v >= 1e3) return `${(v / 1e3).toFixed(1)} KB`;
+    return `${v.toFixed(0)} B`;
+  }
+  function fmtDocs(v: number): string {
+    if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+    if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+    if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+    return v.toLocaleString();
+  }
+
   // Sample docs — default to 1 (fast); user can bump the limit to pull more.
   let sampleDocs = $state<unknown[]>([]);
   let sampleLoading = $state(false);
@@ -191,6 +249,9 @@
       Schema · {schemaRows.length}
     </button>
     <button class:active={tab === 'sample'} onclick={() => (tab = 'sample')}>Sample</button>
+  {/if}
+  {#if specKind === 'capture' || specKind === 'materialization'}
+    <button class:active={tab === 'data'} onclick={() => (tab = 'data')}>Data</button>
   {/if}
 </div>
 
@@ -472,6 +533,89 @@
       {/each}
     </div>
   {/if}
+{:else if tab === 'data'}
+  <div class="hist-controls">
+    <div class="range-pills">
+      <span class="range-lbl">since:</span>
+      {#each USAGE_RANGES as r}
+        <button
+          type="button"
+          class="range-pill"
+          class:on={usageSince === r.value}
+          onclick={() => (usageSince = r.value)}
+        >{r.label}</button>
+      {/each}
+    </div>
+    <div class="range-pills">
+      <span class="range-lbl">metric:</span>
+      <button
+        type="button"
+        class="range-pill"
+        class:on={usageMetric === 'bytes'}
+        onclick={() => (usageMetric = 'bytes')}
+      >Data</button>
+      <button
+        type="button"
+        class="range-pill"
+        class:on={usageMetric === 'docs'}
+        onclick={() => (usageMetric = 'docs')}
+      >Docs</button>
+    </div>
+    <span class="muted small" style="margin-left:auto">
+      {#if usageLoading}reading via <code>flowctl raw stats</code>…{:else if usage}bucket · {usage.bucket} · {usage.fetchedRecords.toLocaleString()} txns{/if}
+    </span>
+  </div>
+
+  {#if usageLoading && !usage}
+    <p class="muted small">this can take 5–30s per request (stats stream can be large)</p>
+  {:else if usageError}
+    <div class="error-box">{usageError}</div>
+  {:else if usage}
+    <div class="usage-cards">
+      <div class="usage-card">
+        <div class="uc-label">Total data {specKind === 'capture' ? 'in' : 'read'}</div>
+        <div class="uc-value">{fmtBytes(usage.total.bytes)}</div>
+        <div class="uc-sub">over {usage.since}</div>
+      </div>
+      <div class="usage-card">
+        <div class="uc-label">Total documents</div>
+        <div class="uc-value">{fmtDocs(usage.total.docs)}</div>
+        <div class="uc-sub">{usage.total.txns.toLocaleString()} transactions</div>
+      </div>
+      <div class="usage-card">
+        <div class="uc-label">Per hour (avg)</div>
+        <div class="uc-value sub">{fmtBytes(usage.total.bytes / (usageSince === '24h' ? 24 : usageSince === '7d' ? 168 : 720))}</div>
+        <div class="uc-sub">{fmtDocs(usage.total.docs / (usageSince === '24h' ? 24 : usageSince === '7d' ? 168 : 720))} docs/h</div>
+      </div>
+    </div>
+
+    <div style="margin: 20px 0 8px">
+      <BarChart
+        series={usage.series}
+        valueKey={usageMetric}
+        format={usageMetric === 'bytes' ? fmtBytes : fmtDocs}
+      />
+    </div>
+
+    {#if Object.keys(usage.byBinding).length > 1}
+      <h4 class="section-title">Per binding</h4>
+      <table>
+        <thead>
+          <tr><th>Binding</th><th style="text-align:right">Data</th><th style="text-align:right">Docs</th><th style="text-align:right">Txns</th></tr>
+        </thead>
+        <tbody>
+          {#each Object.entries(usage.byBinding).sort((a, b) => b[1].bytes - a[1].bytes) as [name, b]}
+            <tr>
+              <td class="mono-cell" style="font-size:11px">{name}</td>
+              <td class="dim mono-cell" style="text-align:right">{fmtBytes(b.bytes)}</td>
+              <td class="dim mono-cell" style="text-align:right">{fmtDocs(b.docs)}</td>
+              <td class="dim mono-cell" style="text-align:right">{b.txns.toLocaleString()}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  {/if}
 {/if}
 
 <style>
@@ -572,5 +716,41 @@
     background: rgba(208, 255, 63, 0.08);
     color: var(--accent);
     border-color: var(--accent);
+  }
+  .usage-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 4px;
+  }
+  .usage-card {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .uc-label {
+    color: var(--text-dim);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .uc-value {
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .uc-value.sub { font-size: 18px; }
+  .uc-sub {
+    color: var(--text-mute);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    margin-top: auto;
   }
 </style>
