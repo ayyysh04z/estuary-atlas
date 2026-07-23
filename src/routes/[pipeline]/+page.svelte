@@ -625,7 +625,7 @@
       {#each stats.cost.disclaimers as d}
         <li>{d}</li>
       {/each}
-      <li>{stats.docCounts.note}</li>
+      <li>{stats.docCounters.note}</li>
     </ul>
   {/if}
 {/if}
