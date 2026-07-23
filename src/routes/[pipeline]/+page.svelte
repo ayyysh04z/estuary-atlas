@@ -3,6 +3,7 @@
   import Chips from '$lib/components/Chips.svelte';
   import Skeleton from '$lib/components/Skeleton.svelte';
   import BarChart from '$lib/components/BarChart.svelte';
+  import MultiBarChart from '$lib/components/MultiBarChart.svelte';
   import { captureChips, collectionChips, materializationChips, extractSpecBody } from '$lib/chips';
   import type { HistoryEvent, LogRow } from '$lib/server/flowctl';
 
@@ -141,19 +142,13 @@
     return { total, done, errors, pending: total - done };
   });
 
-  // Extract source-only or destination-only series for the two BarCharts
-  const sourceSeries = $derived(
+  // Combined series for the MultiBarChart — one row per bucket with
+  // metric-appropriate keys already resolved.
+  const combinedSeries = $derived(
     timelineSeries.map((b) => ({
       ts: b.ts,
-      bytes: b.sourceBytes,
-      docs: b.sourceDocs
-    }))
-  );
-  const destSeries = $derived(
-    timelineSeries.map((b) => ({
-      ts: b.ts,
-      bytes: b.destBytes,
-      docs: b.destDocs
+      source: timelineMetric === 'bytes' ? b.sourceBytes : b.sourceDocs,
+      dest: timelineMetric === 'bytes' ? b.destBytes : b.destDocs
     }))
   );
 
@@ -786,23 +781,18 @@
     {:else if timelineSeries.length > 0}
       <div class="chart-header">
         <span class="legend-dot" style="background:#7fbfff"></span>
-        <span class="chart-title">Sources — data written INTO Flow</span>
+        <span class="chart-title">Sources vs Destinations</span>
+        <span class="chart-help muted small">
+          · thin blue bar = data IN (captures write) · thin amber bar = data OUT (mats read) · hover any bar for exact values
+        </span>
       </div>
-      <BarChart
-        series={sourceSeries}
-        valueKey={timelineMetric}
+      <MultiBarChart
+        data={combinedSeries}
+        series={[
+          { key: 'source', label: 'Sources · data in',  color: '#7fbfff' },
+          { key: 'dest',   label: 'Destinations · out', color: '#ffb547' }
+        ]}
         format={timelineMetric === 'bytes' ? fmtBytes : fmtDocs}
-        color="#7fbfff"
-      />
-      <div class="chart-header" style="margin-top:20px">
-        <span class="legend-dot" style="background:#ffb547"></span>
-        <span class="chart-title">Destinations — data read FROM Flow</span>
-      </div>
-      <BarChart
-        series={destSeries}
-        valueKey={timelineMetric}
-        format={timelineMetric === 'bytes' ? fmtBytes : fmtDocs}
-        color="#ffb547"
       />
     {/if}
     <!-- ─── /Timeline ──────────────────────────────────────────────────── -->
@@ -1060,4 +1050,5 @@
     border-radius: 4px 4px 0 0;
   }
   .chart-title { color: var(--text); font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
+  .chart-help { margin-left: auto; text-align: right; }
 </style>
