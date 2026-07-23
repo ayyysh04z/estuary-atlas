@@ -11,7 +11,7 @@ import { error, json } from '@sveltejs/kit';
 //   bucket — 1h | 6h | 1d — bucket width for the time series
 // -----------------------------------------------------------------------------
 
-const TIMEOUT_MS = 120_000;
+const TIMEOUT_MS = 8 * 60_000;  // 8 min — chatty CDC captures over 30d+ need it
 
 interface Bucket {
   ts: string;
@@ -30,10 +30,12 @@ interface StatsResult {
   fetchedRecords: number;
 }
 
-// Simple in-memory cache — same TTL semantics as the flowctl wrapper
+// Longer cache TTL because raw stats aggregation is expensive.
 interface CacheEntry { at: number; value: StatsResult }
 const cache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 15 * 60_000;  // 15 min — historical data doesn't shift fast
+// In-flight dedupe: two clients hitting the same query share one flowctl run.
+const inflight = new Map<string, Promise<StatsResult>>();
 
 function bucketMs(bucket: string): number {
   if (bucket === '6h') return 6 * 3600e3;
@@ -45,9 +47,13 @@ function bucketFor(tsMs: number, widthMs: number): number {
   return Math.floor(tsMs / widthMs) * widthMs;
 }
 
-async function readStats(task: string, since: string): Promise<{ records: unknown[]; err?: string }> {
+async function readStats(task: string, since: string, notBefore?: string): Promise<{ records: unknown[]; err?: string }> {
   return new Promise((resolve) => {
-    const args = ['raw', 'stats', '--task', task, '--since', since, '-o', 'json'];
+    // If an explicit --not-before RFC-3339 timestamp is given we prefer it
+    // (lets the client anchor to any past date, no upper bound).
+    const args = notBefore
+      ? ['raw', 'stats', '--task', task, '--not-before', notBefore, '-o', 'json']
+      : ['raw', 'stats', '--task', task, '--since', since, '-o', 'json'];
     const child = spawn('flowctl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const records: unknown[] = [];
     let buf = '';
@@ -85,16 +91,40 @@ interface RawStatsRecord {
 export const GET = async ({ url }) => {
   const task = url.searchParams.get('task');
   const since = url.searchParams.get('since') ?? '24h';
-  const bucket = url.searchParams.get('bucket') ?? (since === '30d' ? '1d' : since === '7d' ? '6h' : '1h');
+  const notBefore = url.searchParams.get('notBefore') ?? undefined;   // RFC-3339
+  // Auto-pick bucket width based on window size
+  const bucket = url.searchParams.get('bucket') ?? (
+    notBefore ? '1d' :
+    since === '90d' || since === 'all' ? '1d' :
+    since === '30d' ? '1d' :
+    since === '7d' ? '6h' :
+    '1h'
+  );
   if (!task) throw error(400, 'missing task');
 
-  const key = `${task}|${since}|${bucket}`;
+  const key = `${task}|${notBefore ?? since}|${bucket}`;
   const now = Date.now();
   const hit = cache.get(key);
-  if (hit && now - hit.at < CACHE_TTL_MS) return json(hit.value);
+  if (hit && now - hit.at < CACHE_TTL_MS) return json({ ...hit.value, cached: true, cacheAgeMs: now - hit.at });
+  const pending = inflight.get(key);
+  if (pending) return json(await pending);
 
-  const { records, err } = await readStats(task, since);
-  if (err) return json({ error: err, task, since, bucket }, { status: 502 });
+  const promise = (async () => {
+    const { records, err } = await readStats(task, notBefore ? '30d' : since, notBefore);
+    if (err) throw new Error(err);
+    return { records };
+  })();
+  inflight.set(key, promise as unknown as Promise<StatsResult>);
+  let records: unknown[] = [];
+  try {
+    const r = await promise;
+    records = (r as unknown as { records: unknown[] }).records;
+  } catch (e) {
+    inflight.delete(key);
+    return json({ error: e instanceof Error ? e.message : String(e), task, since, bucket }, { status: 502 });
+  } finally {
+    inflight.delete(key);
+  }
 
   const widthMs = bucketMs(bucket);
   const bucketMap = new Map<number, Bucket>();
@@ -134,13 +164,16 @@ export const GET = async ({ url }) => {
   // Fill missing buckets with zeros so the chart renders a proper timeline
   const nowMs = Date.now();
   const parseSince = (s: string): number => {
+    if (s === 'all') return 365 * 86400e3;
     const m = s.match(/^(\d+)([hdw])$/i);
     if (!m) return 24 * 3600e3;
     const n = parseInt(m[1], 10);
     const unit = m[2].toLowerCase();
     return unit === 'h' ? n * 3600e3 : unit === 'd' ? n * 86400e3 : n * 7 * 86400e3;
   };
-  const startMs = bucketFor(nowMs - parseSince(since), widthMs);
+  const startMs = notBefore
+    ? bucketFor(Date.parse(notBefore), widthMs)
+    : bucketFor(nowMs - parseSince(since), widthMs);
   const endMs = bucketFor(nowMs, widthMs);
   const series: Bucket[] = [];
   for (let ts = startMs; ts <= endMs; ts += widthMs) {

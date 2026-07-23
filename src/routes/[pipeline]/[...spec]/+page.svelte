@@ -150,20 +150,29 @@
   let usageError = $state<string | null>(null);
   let usageSince = $state('7d');
   let usageMetric = $state<'bytes' | 'docs'>('bytes');
+  let usageCustom = $state(false);
+  // Default: from = 90 days ago, to = today (only used when usageCustom = true)
+  let usageFrom = $state(new Date(Date.now() - 90 * 86400e3).toISOString().slice(0, 10));
+  let usageTo = $state(new Date().toISOString().slice(0, 10));
   const USAGE_RANGES = [
     { label: '24h', value: '24h' },
     { label: '7d', value: '7d' },
-    { label: '30d', value: '30d' }
+    { label: '30d', value: '30d' },
+    { label: '90d', value: '90d' },
+    { label: 'all', value: 'all' }
   ];
 
   $effect(() => {
     if (tab !== 'data') return;
     if (specKind !== 'capture' && specKind !== 'materialization') return;
-    const _dep = usageSince;
+    const _dep = usageSince; const _dep2 = usageCustom; const _dep3 = usageFrom; const _dep4 = usageTo;
     const ac = new AbortController();
     usageLoading = true;
     usageError = null;
-    fetch(`/api/data-usage?task=${encodeURIComponent(data.specName)}&since=${usageSince}`, { signal: ac.signal })
+    const params = usageCustom
+      ? `task=${encodeURIComponent(data.specName)}&notBefore=${encodeURIComponent(new Date(usageFrom + 'T00:00:00Z').toISOString())}`
+      : `task=${encodeURIComponent(data.specName)}&since=${usageSince}`;
+    fetch(`/api/data-usage?${params}`, { signal: ac.signal })
       .then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(t))))
       .then((res: UsagePayload) => {
         usage = res;
@@ -541,30 +550,41 @@
         <button
           type="button"
           class="range-pill"
-          class:on={usageSince === r.value}
-          onclick={() => (usageSince = r.value)}
+          class:on={!usageCustom && usageSince === r.value}
+          onclick={() => { usageCustom = false; usageSince = r.value; }}
         >{r.label}</button>
       {/each}
+      <button
+        type="button"
+        class="range-pill"
+        class:on={usageCustom}
+        onclick={() => (usageCustom = !usageCustom)}
+      >custom…</button>
     </div>
+    {#if usageCustom}
+      <div class="range-pills">
+        <span class="range-lbl">from:</span>
+        <input type="date" bind:value={usageFrom} max={usageTo} class="date-input" />
+        <span class="range-lbl">to:</span>
+        <input type="date" bind:value={usageTo} max={new Date().toISOString().slice(0, 10)} class="date-input" />
+      </div>
+    {/if}
     <div class="range-pills">
       <span class="range-lbl">metric:</span>
-      <button
-        type="button"
-        class="range-pill"
-        class:on={usageMetric === 'bytes'}
-        onclick={() => (usageMetric = 'bytes')}
-      >Data</button>
-      <button
-        type="button"
-        class="range-pill"
-        class:on={usageMetric === 'docs'}
-        onclick={() => (usageMetric = 'docs')}
-      >Docs</button>
+      <button type="button" class="range-pill" class:on={usageMetric === 'bytes'} onclick={() => (usageMetric = 'bytes')}>Data</button>
+      <button type="button" class="range-pill" class:on={usageMetric === 'docs'} onclick={() => (usageMetric = 'docs')}>Docs</button>
     </div>
     <span class="muted small" style="margin-left:auto">
       {#if usageLoading}reading via <code>flowctl raw stats</code>…{:else if usage}bucket · {usage.bucket} · {usage.fetchedRecords.toLocaleString()} txns{/if}
     </span>
   </div>
+  {#if usageLoading}
+    <div class="hint" style="margin-bottom:14px">
+      <strong>First load can take 2–8 minutes</strong> for chatty CDC captures over long windows —
+      flowctl streams every transaction. Once fetched the result is cached for <strong>15 minutes</strong>,
+      so subsequent views + metric/window toggles are instant.
+    </div>
+  {/if}
 
   {#if usageLoading && !usage}
     <p class="muted small">this can take 5–30s per request (stats stream can be large)</p>
@@ -753,4 +773,15 @@
     font-family: var(--font-mono);
     margin-top: auto;
   }
+  .date-input {
+    background: var(--bg);
+    border: 1px solid var(--line-strong);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    color-scheme: dark;
+  }
+  .date-input:focus { border-color: var(--accent); outline: none; }
 </style>

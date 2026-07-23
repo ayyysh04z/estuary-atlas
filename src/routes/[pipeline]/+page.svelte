@@ -593,6 +593,14 @@
   {:else if statsError}
     <div class="error-box">{statsError}</div>
   {:else if stats}
+    {#if usageLoading}
+      <div class="hint" style="margin-bottom:16px">
+        <strong>Volume + docs are streaming in.</strong> The atlas is running
+        <code>flowctl raw stats</code> for every task and summing per-transaction
+        counters. On CDC-heavy pipelines (like <code>prod-stack</code>) this can take
+        <strong>2–8 minutes cold</strong>. Subsequent loads within 15 minutes are cached and instant.
+      </div>
+    {/if}
     <div class="stats-grid">
       <div class="stat-card cost">
         <div class="sc-label">Estimated cost · {stats.cost.windowHours}h window</div>
@@ -645,7 +653,9 @@
           {:else if usageError}<span class="dim" style="font-size:12px">error</span>
           {:else}<span class="dim">—</span>{/if}
         </div>
-        <div class="sc-sub">from flowctl raw stats</div>
+        <div class="sc-sub">
+          from flowctl raw stats{#if usage && 'cached' in usage && (usage as {cached?: boolean}).cached} · <span style="color:var(--accent)">cached</span>{/if}
+        </div>
       </div>
       <div class="stat-card">
         <div class="sc-label">Documents</div>

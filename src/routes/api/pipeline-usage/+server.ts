@@ -14,7 +14,7 @@ import { flowctl } from '$lib/server/flowctl';
 
 interface CatalogListItem { catalogName: string }
 
-async function taskUsageTotals(task: string, since: string, timeoutMs = 120_000): Promise<{ bytes: number; docs: number; records: number } | { error: string }> {
+async function taskUsageTotals(task: string, since: string, timeoutMs = 8 * 60_000): Promise<{ bytes: number; docs: number; records: number } | { error: string }> {
   return new Promise((resolve) => {
     const child = spawn('flowctl', ['raw', 'stats', '--task', task, '--since', since, '-o', 'json'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let bytes = 0, docs = 0, records = 0;
@@ -54,9 +54,13 @@ async function taskUsageTotals(task: string, since: string, timeoutMs = 120_000)
   });
 }
 
-// In-memory cache (60s), same as other atlas endpoints
+// In-memory cache. Longer TTL than other endpoints because raw stats
+// aggregation is expensive and the numbers don't change fast.
 const cache = new Map<string, { at: number; value: unknown }>();
-const TTL_MS = 60_000;
+const TTL_MS = 15 * 60_000;  // 15 min
+// In-flight promise dedupe: multiple tabs asking for the same aggregation
+// share one flowctl run instead of spawning duplicates.
+const inflight = new Map<string, Promise<unknown>>();
 
 export const GET = async ({ url }) => {
   const prefix = url.searchParams.get('prefix');
@@ -66,8 +70,13 @@ export const GET = async ({ url }) => {
   const key = `${prefix}|${since}`;
   const now = Date.now();
   const hit = cache.get(key);
-  if (hit && now - hit.at < TTL_MS) return json(hit.value);
+  if (hit && now - hit.at < TTL_MS) return json({ ...(hit.value as object), cached: true, cacheAgeMs: now - hit.at });
 
+  // Dedupe concurrent calls
+  const pending = inflight.get(key);
+  if (pending) return json(await pending);
+
+  const compute = (async () => {
   const rawSince = since === 'all' ? '30d' : since;
   const [captures, mats] = await Promise.all([
     flowctl<CatalogListItem[]>(['catalog', 'list', '--prefix', prefix, '--captures', '-o', 'json']).catch(() => []),
@@ -97,6 +106,14 @@ export const GET = async ({ url }) => {
     }
   });
 
-  cache.set(key, { at: now, value: usage });
-  return json(usage);
+    cache.set(key, { at: Date.now(), value: usage });
+    return usage;
+  })();
+  inflight.set(key, compute);
+  try {
+    const result = await compute;
+    return json(result);
+  } finally {
+    inflight.delete(key);
+  }
 };
