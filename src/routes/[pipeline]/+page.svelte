@@ -2,6 +2,7 @@
   import type { PageProps } from './$types';
   import Chips from '$lib/components/Chips.svelte';
   import Skeleton from '$lib/components/Skeleton.svelte';
+  import BarChart from '$lib/components/BarChart.svelte';
   import { captureChips, collectionChips, materializationChips, extractSpecBody } from '$lib/chips';
   import type { HistoryEvent, LogRow } from '$lib/server/flowctl';
 
@@ -80,6 +81,81 @@
   let usage = $state<UsagePayload | null>(null);
   let usageLoading = $state(false);
   let usageError = $state<string | null>(null);
+
+  // Pipeline TIMELINE — per-task /api/data-usage results merged into
+  // source-lane + destination-lane bucketed series. Progressive: each task
+  // resolves independently and the merged series updates reactively.
+  interface UsageBucket { ts: string; bytes: number; docs: number; txns: number }
+  interface TaskUsage { series: UsageBucket[]; total: { bytes: number; docs: number; txns: number } }
+  let timelineTasks = $state<Record<string, TaskUsage | { error: string } | 'loading'>>({});
+  let timelineMetric = $state<'bytes' | 'docs'>('bytes');
+  let timelineSince = $derived(statsSince === 'all' ? '30d' : statsSince);
+
+  // When statsSince changes OR tab activated, spawn one fetch per task in parallel.
+  $effect(() => {
+    if (tab !== 'stats') return;
+    const _dep = statsSince;
+    const tasks = [
+      ...data.captures.map((c) => ({ name: c.catalogName, kind: 'source' as const })),
+      ...data.materializations.map((m) => ({ name: m.catalogName, kind: 'dest' as const }))
+    ];
+    // Reset and mark all as loading
+    const initial: Record<string, TaskUsage | { error: string } | 'loading'> = {};
+    for (const t of tasks) initial[t.name] = 'loading';
+    timelineTasks = initial;
+    const acs = tasks.map(() => new AbortController());
+    tasks.forEach((t, i) => {
+      fetch(`/api/data-usage?task=${encodeURIComponent(t.name)}&since=${timelineSince}`, { signal: acs[i].signal })
+        .then((r) => (r.ok ? r.json() : r.text().then((tx) => Promise.reject(tx))))
+        .then((res: TaskUsage) => { timelineTasks = { ...timelineTasks, [t.name]: res }; })
+        .catch((err) => {
+          if (acs[i].signal.aborted) return;
+          timelineTasks = { ...timelineTasks, [t.name]: { error: String(err) } };
+        });
+    });
+    return () => acs.forEach((a) => a.abort());
+  });
+
+  // Merged source + destination series aligned to the union of all task buckets.
+  const timelineSeries = $derived.by(() => {
+    const captureNames = new Set(data.captures.map((c) => c.catalogName));
+    const bucketMap = new Map<string, { ts: string; sourceBytes: number; sourceDocs: number; destBytes: number; destDocs: number }>();
+    for (const [name, tu] of Object.entries(timelineTasks)) {
+      if (tu === 'loading' || 'error' in tu) continue;
+      const isSource = captureNames.has(name);
+      for (const b of tu.series) {
+        const key = b.ts;
+        const row = bucketMap.get(key) ?? { ts: key, sourceBytes: 0, sourceDocs: 0, destBytes: 0, destDocs: 0 };
+        if (isSource) { row.sourceBytes += b.bytes; row.sourceDocs += b.docs; }
+        else          { row.destBytes += b.bytes; row.destDocs += b.docs; }
+        bucketMap.set(key, row);
+      }
+    }
+    return [...bucketMap.values()].sort((a, b) => a.ts.localeCompare(b.ts));
+  });
+
+  const timelineProgress = $derived.by(() => {
+    const total = Object.keys(timelineTasks).length;
+    const done = Object.values(timelineTasks).filter((v) => v !== 'loading').length;
+    const errors = Object.values(timelineTasks).filter((v) => typeof v === 'object' && v !== null && 'error' in v).length;
+    return { total, done, errors, pending: total - done };
+  });
+
+  // Extract source-only or destination-only series for the two BarCharts
+  const sourceSeries = $derived(
+    timelineSeries.map((b) => ({
+      ts: b.ts,
+      bytes: b.sourceBytes,
+      docs: b.sourceDocs
+    }))
+  );
+  const destSeries = $derived(
+    timelineSeries.map((b) => ({
+      ts: b.ts,
+      bytes: b.destBytes,
+      docs: b.destDocs
+    }))
+  );
 
   $effect(() => {
     if (tab !== 'stats') return;
@@ -674,6 +750,63 @@
       </div>
     </div>
 
+    <!-- ─── Timeline chart ─────────────────────────────────────────────── -->
+    <h4 class="section-h" style="margin-top:24px">
+      Timeline · sources vs destinations
+      <span class="tl-progress muted small" style="font-weight:normal">
+        {#if timelineProgress.pending > 0}
+          · loading {timelineProgress.done}/{timelineProgress.total} tasks…
+        {:else}
+          · {timelineProgress.done}/{timelineProgress.total} tasks{#if timelineProgress.errors > 0} · <span style="color:var(--danger)">{timelineProgress.errors} failed</span>{/if}
+        {/if}
+      </span>
+    </h4>
+    <div class="timeline-controls">
+      <div class="range-pills">
+        <span class="range-lbl">metric:</span>
+        <button
+          type="button" class="range-pill"
+          class:on={timelineMetric === 'bytes'}
+          onclick={() => (timelineMetric = 'bytes')}
+        >Data</button>
+        <button
+          type="button" class="range-pill"
+          class:on={timelineMetric === 'docs'}
+          onclick={() => (timelineMetric = 'docs')}
+        >Docs</button>
+      </div>
+      <div class="chart-legend">
+        <span><span class="legend-dot" style="background:#7fbfff"></span> Sources (data in)</span>
+        <span><span class="legend-dot" style="background:#ffb547"></span> Destinations (data out)</span>
+      </div>
+    </div>
+
+    {#if timelineSeries.length === 0 && timelineProgress.pending > 0}
+      <Skeleton rows={3} height="60px" />
+    {:else if timelineSeries.length > 0}
+      <div class="chart-header">
+        <span class="legend-dot" style="background:#7fbfff"></span>
+        <span class="chart-title">Sources — data written INTO Flow</span>
+      </div>
+      <BarChart
+        series={sourceSeries}
+        valueKey={timelineMetric}
+        format={timelineMetric === 'bytes' ? fmtBytes : fmtDocs}
+        color="#7fbfff"
+      />
+      <div class="chart-header" style="margin-top:20px">
+        <span class="legend-dot" style="background:#ffb547"></span>
+        <span class="chart-title">Destinations — data read FROM Flow</span>
+      </div>
+      <BarChart
+        series={destSeries}
+        valueKey={timelineMetric}
+        format={timelineMetric === 'bytes' ? fmtBytes : fmtDocs}
+        color="#ffb547"
+      />
+    {/if}
+    <!-- ─── /Timeline ──────────────────────────────────────────────────── -->
+
     {#if usage && Object.keys(usage.byTask).length > 0}
       {@const captureNames = new Set(data.captures.map(c => c.catalogName))}
       {@const sourceEntries = Object.entries(usage.byTask).filter(([n]) => captureNames.has(n)).sort((a, b) => b[1].bytes - a[1].bytes)}
@@ -911,4 +1044,20 @@
   ul.notes { margin: 0; padding-left: 20px; line-height: 1.6; }
   ul.notes li { margin-bottom: 6px; }
   .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .tl-progress { margin-left: 8px; }
+  .timeline-controls {
+    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+    padding: 12px 16px; margin-bottom: 12px;
+    background: var(--bg-2); border: 1px solid var(--line); border-radius: 4px;
+  }
+  .chart-legend { display: flex; gap: 16px; color: var(--text-dim); font-size: 11.5px; margin-left: auto; }
+  .chart-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px 8px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+  }
+  .chart-title { color: var(--text); font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
 </style>
