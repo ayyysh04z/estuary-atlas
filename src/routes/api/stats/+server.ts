@@ -152,7 +152,21 @@ export const GET = async ({ url }) => {
       priorTasks += 2;
     }
     const currency = url.searchParams.get('currency') ?? 'USD';
-    const cost = estimateCost(taskCount, priorTasks, hrs, slug, since, currency);
+    // Compute active hours per task from shard status.
+    // The window is [max(cutoff, firstActivityAt), min(now, lastActivityAt)].
+    const now = Date.now();
+    const activeHoursByTask: number[] = tasks.map((t) => {
+      const s = statuses.find((x) => x.name === t.catalogName);
+      if (!s) return hrs; // no status data — fall back to assuming continuous
+      const first = s.firstActivityAt ? Date.parse(s.firstActivityAt) : 0;
+      const last = s.lastActivityAt ? Date.parse(s.lastActivityAt) : now;
+      const windowStart = cutoff === -Infinity ? 0 : cutoff;
+      const activeStart = Math.max(windowStart, first);
+      const activeEnd = Math.min(now, last);
+      const activeMs = Math.max(0, activeEnd - activeStart);
+      return activeMs / 3600e3;
+    });
+    const cost = estimateCost(activeHoursByTask, priorTasks, hrs, slug, since, currency);
 
     return json({
       since,

@@ -70,7 +70,7 @@ export interface CostBreakdown {
  * @param slug          Pipeline slug (for looking up per-pipeline GB overrides).
  */
 export function estimateCost(
-  taskCount: number,
+  activeHoursByTask: number[],   // one entry per task; may be < windowHours if the task was idle
   existingTaskCount: number,
   windowHours: number,
   slug: string,
@@ -79,21 +79,33 @@ export function estimateCost(
 ): CostBreakdown {
   const p = loadPricing();
   const disclaimers: string[] = [];
+  const taskCount = activeHoursByTask.length;
 
-  // ─── Task-hour cost ───────────────────────────────────────────────────────
+  // ─── Task-hour cost — split each task's active hours across pricing tiers ──
   const firstTierLimit = p.task_hours.first_tier.tasks;
   const remainingFirstTierSlots = Math.max(0, firstTierLimit - existingTaskCount);
-  const inFirstTier = Math.min(taskCount, remainingFirstTierSlots);
-  const inAdditionalTier = Math.max(0, taskCount - inFirstTier);
-  const firstTierCost = inFirstTier * windowHours * p.task_hours.first_tier.hourly_price_per_task;
-  const additionalTierCost =
-    inAdditionalTier * windowHours * p.task_hours.additional_tier.hourly_price_per_task;
+  let firstTierCost = 0;
+  let additionalTierCost = 0;
+  let firstTierTasks = 0;
+  let additionalTierTasks = 0;
+  activeHoursByTask.forEach((hrs, idx) => {
+    if (hrs <= 0) return;
+    if (idx < remainingFirstTierSlots) {
+      firstTierCost += hrs * p.task_hours.first_tier.hourly_price_per_task;
+      firstTierTasks++;
+    } else {
+      additionalTierCost += hrs * p.task_hours.additional_tier.hourly_price_per_task;
+      additionalTierTasks++;
+    }
+  });
   const taskHourCost = firstTierCost + additionalTierCost;
-
+  const totalActiveHours = activeHoursByTask.reduce((a, b) => a + Math.max(0, b), 0);
   const perTierExplanation =
-    inAdditionalTier === 0
-      ? `${taskCount} × ${windowHours}h × $${p.task_hours.first_tier.hourly_price_per_task}/h`
-      : `${inFirstTier} × $${p.task_hours.first_tier.hourly_price_per_task}/h + ${inAdditionalTier} × $${p.task_hours.additional_tier.hourly_price_per_task}/h · ${windowHours}h window`;
+    additionalTierTasks === 0 && firstTierTasks === 0
+      ? `no active tasks in window`
+      : additionalTierTasks === 0
+        ? `${firstTierTasks} task${firstTierTasks === 1 ? '' : 's'} · ${totalActiveHours.toFixed(1)}h × $${p.task_hours.first_tier.hourly_price_per_task}/h`
+        : `${firstTierTasks} × $${p.task_hours.first_tier.hourly_price_per_task}/h + ${additionalTierTasks} × $${p.task_hours.additional_tier.hourly_price_per_task}/h · ${totalActiveHours.toFixed(1)}h active in ${windowHours}h window`;
 
   // ─── Data volume cost ─────────────────────────────────────────────────────
   const override = p.pipeline_overrides?.[slug];
@@ -103,11 +115,8 @@ export function estimateCost(
     const monthlyGbCost = gbPerMonth * p.data_volume.price_per_gb;
     const scaled = (monthlyGbCost * windowHours) / p.task_hours.hours_per_month;
     dataVolumeCost = Number(scaled.toFixed(4));
-  } else {
-    disclaimers.push(
-      `Data volume cost NOT included — set 'pipeline_overrides.${slug}.gb_per_month' in data/pricing.yaml to enable.`
-    );
   }
+  // No disclaimer for missing gb_per_month — user asked to remove the nag.
 
   // ─── BYOC monthly fee ─────────────────────────────────────────────────────
   let byocMonthlyCost: number | null = null;
@@ -124,11 +133,16 @@ export function estimateCost(
   const byocConv = byocMonthlyCost != null ? byocMonthlyCost * fxRate : null;
   const taskHourConv = taskHourCost * fxRate;
 
+  // Task-hour cost is now derived from actual shard activation windows
+  // (via catalog status). No blanket "assumes continuous" disclaimer.
+  if (totalActiveHours < windowHours * 0.9 && taskCount > 0) {
+    // Only mention idle time when meaningful — helps explain low totals.
+    disclaimers.push(
+      `Some tasks were idle: ${totalActiveHours.toFixed(1)}h of possible ${(taskCount * windowHours).toFixed(0)}h were active per shard status.`
+    );
+  }
   disclaimers.push(
-    'Task-hour cost assumes tasks are continuously active during the window. If a shard was paused / not activated, the actual bill is lower.'
-  );
-  disclaimers.push(
-    "Estuary's per-account free plan (2 tasks + 10 GB/month) and cross-pipeline tier discounts are approximated here — this is an ESTIMATE, not a bill."
+    "Estuary's per-account free plan (2 tasks + 10 GB/month) and cross-pipeline tier discounts are approximated — this is an ESTIMATE, not a bill."
   );
 
   return {
