@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { parse } from 'yaml';
@@ -28,9 +28,23 @@ let cached: { at: number; value: Pricing } | null = null;
 const TTL_MS = 60_000;
 
 function pricingPath(): string {
-  // Walk up from src/lib/server/pricing.ts → atlas/data/pricing.yaml
+  // Try multiple candidate locations because layout differs between:
+  //   - dev tree:            src/lib/server/pricing.ts → ../../../data/pricing.yaml
+  //   - packaged tarball:    build/server/... → siblings 'data' next to 'build'
+  //   - homebrew install:    libexec/build/... → siblings 'data' next to 'build'
   const here = dirname(fileURLToPath(import.meta.url));
-  return resolve(here, '../../../data/pricing.yaml');
+  const candidates = [
+    resolve(here, '../../../data/pricing.yaml'),         // dev tree
+    resolve(here, '../../data/pricing.yaml'),            // build/server/chunks/ → build/data (unused, fallback)
+    resolve(here, '../data/pricing.yaml'),               // build/server/ → build/data
+    resolve(here, '../../../../data/pricing.yaml'),      // deeper nesting fallback
+    resolve(process.cwd(), 'data/pricing.yaml')          // wherever the process was launched
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  // Last-resort: return the dev-tree guess so the error message is descriptive.
+  return candidates[0];
 }
 
 export function loadPricing(): Pricing {

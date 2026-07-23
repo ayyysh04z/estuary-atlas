@@ -79,6 +79,10 @@ make_tarball() {
   # even though our dev tree keeps it under artifacts/build/.
   cp -r "$BUILD_DIR" "$STAGING/build"
   cp -r bin "$STAGING/bin"
+  # Runtime data (pricing.yaml etc.) — resolved by server code via
+  # ../../../data/pricing.yaml relative to src/lib/server/pricing.ts, so it
+  # MUST sit alongside the build directory in the packaged layout.
+  cp -r data "$STAGING/data"
   chmod +x "$STAGING/bin/estuary-atlas"
 
   # Convenience: top-level `./estuary-atlas` shortcut
